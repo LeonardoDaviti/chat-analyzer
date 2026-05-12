@@ -1,0 +1,25 @@
+# Data directories (large, user-specific)
+Chats/
+Outputs/
+outputs/
+
+# Virtual environment
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Analysis cache / temp files
+*.cache
+normalized_cache.json
