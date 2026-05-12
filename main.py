@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from src.data_loader import load_chat_from_dir, get_chat_name_from_dir, load_chats_from_dirs
 from src.session_chunker import chunk_messages, get_session_statistics
+from src.session_markdown import export_sessions_to_markdown
 from src.analyzer import ChatAnalyzer
 from src.visualizer import ChatVisualizer
 from src.visualizer_v3 import AdvancedMetricsVisualizerV3
@@ -198,7 +199,17 @@ def run_chat_pipeline(
     
     save_json(session_analyses, output_paths['session_analyses'])
     
-    # Step 7: Save metadata
+    # Step 7: Export sessions as markdown files
+    print("\n📝 Exporting session markdown files...")
+    export_sessions_to_markdown(
+        sessions_path=str(output_paths['sessions']),
+        output_dir=str(output_paths['sessions_md']),
+        chat_name=chat_name,
+        min_session_messages=200,
+        my_name=my_name
+    )
+    
+    # Step 8: Save metadata
     elapsed = time.time() - start_time
     metadata = {
         'chat_name': chat_name,
@@ -210,12 +221,18 @@ def run_chat_pipeline(
     }
     save_json(metadata, output_paths['metadata'])
     
+    # Count markdown files
+    md_file_count = 0
+    md_dir = output_paths.get('sessions_md')
+    if md_dir and md_dir.exists():
+        md_file_count = len(list(md_dir.iterdir()))
+    
     print(f"\n{'='*60}")
     print(f"✅ Complete! ({elapsed:.1f}s)")
     print(f"   Output: {output_paths['base']}")
     print(f"   Files: sessions.json, analysis.json, session_stats.json, ")
     print(f"          session_analyses.json, normalized.json, metadata.json,")
-    print(f"          visualizations/ (22+ charts)")
+    print(f"          visualizations/ (22+ charts), sessions_md/ ({md_file_count} .md files)")
     print(f"{'='*60}")
     
     return {

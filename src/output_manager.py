@@ -48,6 +48,10 @@ def create_output_dir(base_dir: str, chat_name: str) -> Dict[str, Path]:
     viz_dir = output_base / "visualizations"
     viz_dir.mkdir(exist_ok=True)
     
+    # Create sessions markdown directory
+    sessions_md_dir = output_base / "sessions_md"
+    sessions_md_dir.mkdir(exist_ok=True)
+    
     return {
         'base': output_base,
         'visualizations': viz_dir,
@@ -57,6 +61,7 @@ def create_output_dir(base_dir: str, chat_name: str) -> Dict[str, Path]:
         'session_analyses': output_base / 'session_analyses.json',
         'normalized': output_base / 'normalized.json',
         'metadata': output_base / 'metadata.json',
+        'sessions_md': sessions_md_dir,
     }
 
 
