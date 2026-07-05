@@ -93,28 +93,43 @@ class TestLanguageDistribution:
         assert result["english"] == 100.0
 
     def test_georgian_detected(self):
-        # Georgian text in Instagram JSON has á characters (latin-1 encoded UTF-8)
+        # Single detector (normalizer.detect_language) on decoded Georgian text.
+        # (The old undecoded 'a-accent' heuristic detector was removed - A3.)
         msgs = [
-            make_msg("David", 0, "á\x83®á\x83\u0592á\x83¡á\x83\x90"),  # Decodes to Georgian
-            make_msg("Mariam", 1, "á\x83©á\x83¥á\x83á\x83¡á\x83á\x83¡á\x83˜"),
+            make_msg("David", 0, "როგორ ხარ"),
+            make_msg("Mariam", 1, "კარგად ვარ"),
         ]
         result = get_language_distribution(msgs)
         assert "georgian" in result
         assert result["georgian"] == 100.0
+
+    def test_language_field_is_aggregated(self):
+        # Aggregates the normalizer's per-message `language` field directly.
+        msgs = [
+            {"sender_name": "David", "content": "hi", "language": "english"},
+            {"sender_name": "David", "content": "x", "language": "georgian"},
+            {"sender_name": "David", "content": "y", "language": "system"},
+        ]
+        result = get_language_distribution(msgs)
+        assert result["english"] == 50.0
+        assert result["georgian"] == 50.0
 
 
 class TestWordFrequency:
     """Test word frequency counting."""
 
     def test_top_words(self):
+        # NOTE: "hello"/"world" were poor choices originally — "hello" is a
+        # word_frequency stopword and is (correctly) filtered. Use non-stopword
+        # content words to exercise the counting mechanics.
         msgs = [
-            make_msg("David", 0, "hello hello world"),
-            make_msg("David", 1, "hello there"),
-            make_msg("Mariam", 2, "world world world"),
+            make_msg("David", 0, "apple apple banana"),
+            make_msg("David", 1, "apple cherry"),
+            make_msg("Mariam", 2, "banana banana banana"),
         ]
         result = get_word_frequency(msgs, "David")
-        assert result["hello"] == 3
-        assert result["world"] == 1
+        assert result["apple"] == 3
+        assert result["banana"] == 1
 
     def test_empty_messages(self):
         msgs = [
@@ -383,8 +398,13 @@ class TestConversationalInertia:
             make_msg("Mariam", 10001, "hello"),
         ]
         result = conversational_inertia(msgs, ["David", "Mariam"])
-        assert isinstance(result, (int, float))
-        assert result >= 0
+        # C10: now returns a per-user breakdown (not a single blended float).
+        assert isinstance(result, dict)
+        assert "David" in result and "Mariam" in result
+        assert result["David"]["avg_restart_effort"] >= 0
+        assert set(result["David"].keys()) == {
+            "avg_restart_effort", "failed_restarts", "answered_restarts"
+        }
 
 
 class TestSignalToNoiseRatio:

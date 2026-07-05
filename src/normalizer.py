@@ -23,9 +23,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
 
+from src.timeutil import to_datetime, DEFAULT_TIMEZONE
+
 
 # Georgian Unicode range: U+10A0 to U+10FF
 GEORGIAN_PATTERN = re.compile(r'[\u10A0-\u10FF]+')
+
+
+def _count_georgian_chars(text: str) -> int:
+    """Count individual Georgian characters (not contiguous runs).
+
+    ``GEORGIAN_PATTERN.findall`` returns runs because of the ``+`` quantifier,
+    which undercounts long Georgian words. Count characters directly instead
+    (BUG_REPORT A2).
+    """
+    return sum(1 for ch in text if '\u10A0' <= ch <= '\u10FF')
 
 
 def decode_georgian_text(text: str) -> str:
@@ -47,18 +59,19 @@ def decode_georgian_text(text: str) -> str:
     """
     if not text:
         return text
-    
+
     try:
-        # Encode as latin-1 (reverses the wrong encoding), then decode as UTF-8
-        decoded = text.encode('latin-1').decode('utf-8')
-        
-        # Verify the result contains valid Georgian characters
-        if GEORGIAN_PATTERN.search(decoded):
-            return decoded
+        # Encode as latin-1 (reverses the wrong encoding), then decode as UTF-8.
+        # Any successful decode is accepted — this repairs not just Georgian but
+        # also Cyrillic titles and EMOJI (which the old Georgian-only check left
+        # mangled, silently blinding all emoji/affect metrics). Pure-ASCII text
+        # round-trips unchanged; legitimate latin-1 text (e.g. "café") fails the
+        # UTF-8 decode and is returned as-is.
+        return text.encode('latin-1').decode('utf-8')
     except (UnicodeEncodeError, UnicodeDecodeError):
         pass
-    
-    # Return original if decoding fails or doesn't produce Georgian text
+
+    # Return original if decoding fails
     return text
 
 
@@ -76,12 +89,12 @@ def detect_language(text: str) -> str:
     
     text = text.strip()
     total_chars = len(text)
-    
+
     if total_chars == 0:
         return "english"
-    
-    # Count Georgian Unicode characters
-    georgian_chars = len(GEORGIAN_PATTERN.findall(text))
+
+    # Count Georgian Unicode characters (individual chars, not runs)
+    georgian_chars = _count_georgian_chars(text)
     georgian_ratio = georgian_chars / total_chars
     
     # Check for Latin/English characters
@@ -101,46 +114,105 @@ def detect_language(text: str) -> str:
         return "english"
 
 
-def format_timestamp(timestamp_ms: int) -> str:
+def format_timestamp(timestamp_ms: int, timezone: str = DEFAULT_TIMEZONE) -> str:
     """Convert Unix timestamp (milliseconds) to formatted datetime string.
-    
+
     Format: HH:MM DD-MM-YYYY
-    
+
     Args:
         timestamp_ms: Unix timestamp in milliseconds
-        
+        timezone: IANA timezone used to render the wall-clock time
+
     Returns:
         Formatted string like "15:07 26-04-2026"
     """
-    dt = datetime.fromtimestamp(timestamp_ms / 1000)
-    return dt.strftime('%H:%M %d-%m-%Y')
+    return to_datetime(timestamp_ms, timezone).strftime('%H:%M %d-%m-%Y')
 
 
-def is_system_message(content: str) -> bool:
+# Anchored regexes for Instagram system/notification messages. Anchoring avoids
+# the "mid-sentence substring" false positives of the old list (e.g. dropping
+# "I added you on Steam" or "she reacted badly"). See BUG_REPORT A1.
+_SYSTEM_PATTERNS = [
+    re.compile(r'^liked a message$'),
+    re.compile(r'^reacted .{1,6} to your message$'),
+    re.compile(r'^.+ sent an attachment\.$'),
+    re.compile(r'^sent an attachment\.$'),
+    re.compile(r'^.* changed the chat icon\.?$'),
+    re.compile(r'^.* named the group .*$'),
+    re.compile(r'^.* started a group conversation.*$'),
+    re.compile(r'^.+ added .+ to the group\.?$'),
+    re.compile(r'^.+ removed .+ from the group\.?$'),
+]
+
+
+def is_system_message(msg: Any) -> bool:
     """Check if a message is an Instagram system/notification message.
-    
-    These should be skipped during normalization and analysis.
-    
+
+    Accepts either a message dict (preferred — structural fields are checked
+    first) or a raw content string (backward compatible).
+
     Args:
-        content: The message content string
-        
+        msg: Message dictionary or content string
+
     Returns:
         True if this is a system message that should be skipped
     """
-    if not content:
-        return True
-    
-    skip_patterns = [
-        'Liked a message',           # Instagram like reaction
-        'reacted',                   # Reaction to message
-        'sent an attachment.',       # Media share notification
-        'changed the chat icon',     # Chat setting change
-        'started a group conversation',
-        'added',                     # Member added notification
-    ]
-    
-    content_lower = content.lower().strip()
-    return any(pattern in content_lower for pattern in skip_patterns)
+    if isinstance(msg, dict):
+        # Structural signal first: an unsent/removed message is not real content.
+        if msg.get('is_unsent'):
+            return True
+        content = msg.get('content', '') or ''
+    else:
+        content = msg or ''
+
+    content_norm = content.lower().strip()
+    if not content_norm:
+        # Empty content is not classified as a system message here; media/empty
+        # handling happens in normalize_message.
+        return False
+
+    return any(pat.match(content_norm) for pat in _SYSTEM_PATTERNS)
+
+
+def is_real_message(msg: Dict[str, Any]) -> bool:
+    """Single shared predicate: is this a real conversational text message?
+
+    Unifies the two divergent predicates that previously existed
+    (``normalizer.is_system_message`` and ``session_chunker.is_real_message``).
+    A real message has text content and is neither a system notification nor a
+    media-only event. See BUG_REPORT C15.
+    """
+    lang = msg.get('language')
+    if lang in ('system', 'media'):
+        return False
+
+    content = msg.get('content', '') or ''
+    if not content.strip():
+        return False
+
+    return not is_system_message(msg)
+
+
+def derive_message_type(msg: Dict[str, Any]) -> str:
+    """Derive a coarse message ``type`` from Instagram structural fields.
+
+    The normalizer never wrote a ``type`` field, so the markdown exporter
+    silently dropped all media exchanges (BUG_REPORT C16). This makes media
+    visible to downstream consumers.
+    """
+    if msg.get('call_duration') is not None:
+        return 'call'
+    if msg.get('photos'):
+        return 'photo'
+    if msg.get('videos'):
+        return 'video'
+    if msg.get('audio_files'):
+        return 'voice'
+    if msg.get('share'):
+        return 'share'
+    if msg.get('sticker'):
+        return 'sticker'
+    return 'text'
 
 
 def normalize_message(msg: Dict[str, Any]) -> Dict[str, Any]:
@@ -168,30 +240,36 @@ def normalize_message(msg: Dict[str, Any]) -> Dict[str, Any]:
     
     # Add formatted timestamp (HH:MM DD-MM-YYYY)
     normalized['formatted_timestamp'] = format_timestamp(normalized.get('timestamp_ms', 0))
-    
+
+    # Decode mojibake sender names (Georgian/Cyrillic names otherwise become
+    # 'á...' keys throughout the analysis)
+    if normalized.get('sender_name'):
+        normalized['sender_name'] = decode_georgian_text(normalized['sender_name'])
+
+    # Derive a coarse message type from structural fields (photo/video/call/...)
+    normalized['type'] = derive_message_type(normalized)
+
     # Decode content and detect language (skip system messages)
     if 'content' in normalized and normalized['content']:
-        content = normalized['content']
-        
-        # Skip Instagram system/notification messages
-        if is_system_message(content):
+        # Skip Instagram system/notification messages (structural + anchored regex)
+        if is_system_message(normalized):
             normalized['language'] = 'system'
             return normalized
-        
-        original_content = content
+
+        original_content = normalized['content']
         decoded_content = decode_georgian_text(original_content)
-        
+
         # Replace content with decoded version for downstream analysis
         normalized['content'] = decoded_content
         normalized['language'] = detect_language(decoded_content)
-        
+
         # Keep original for reference
         if decoded_content != original_content:
             normalized['original_content'] = original_content
     else:
         # Non-text messages (photos, videos, etc.)
         normalized['language'] = 'media'
-    
+
     return normalized
 
 
@@ -206,9 +284,19 @@ def normalize_chat(chat_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     messages = chat_data.get('messages', [])
     normalized_messages = [normalize_message(msg) for msg in messages]
-    
+
     normalized = dict(chat_data)
     normalized['messages'] = normalized_messages
+
+    # Decode mojibake in chat title and participant names so output folders,
+    # analysis keys, and chart labels show real Georgian/Cyrillic/emoji text
+    if normalized.get('title'):
+        normalized['title'] = decode_georgian_text(normalized['title'])
+    if normalized.get('participants'):
+        normalized['participants'] = [
+            {**p, 'name': decode_georgian_text(p.get('name', ''))}
+            for p in normalized['participants']
+        ]
     
     # Add normalization metadata
     langs = {}

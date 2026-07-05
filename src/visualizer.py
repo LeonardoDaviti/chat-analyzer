@@ -141,7 +141,11 @@ class ChatVisualizer:
     def generate_all_plots(self, analysis: Dict, chat_name: str):
         """Generate all visualizations for a chat."""
         print(f"  Generating visualizations...")
-        
+
+        # Keep chart filenames within the OS byte limit for long chat titles
+        from src.output_manager import truncate_component
+        chat_name = truncate_component(chat_name, max_bytes=60)
+
         self.plot_message_distribution(analysis, chat_name)
         self.plot_day_of_week(analysis, chat_name)
         self.plot_yearly_trends(analysis, chat_name)

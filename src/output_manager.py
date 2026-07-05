@@ -82,7 +82,21 @@ def _sanitize_filename(name: str) -> str:
     safe = safe.replace('|', '_')
     # Remove extra whitespace
     safe = ' '.join(safe.split())
-    return safe
+    return truncate_component(safe)
+
+
+def truncate_component(name: str, max_bytes: int = 80) -> str:
+    """Truncate a path component to a UTF-8 byte budget.
+
+    Long chat titles (especially multi-byte Georgian/Cyrillic ones, and worse
+    when still mojibake-encoded) can push a chart filename past the OS limit of
+    255 bytes per component. Truncate on a character boundary so we never split
+    a multi-byte sequence.
+    """
+    encoded = name.encode('utf-8')
+    if len(encoded) <= max_bytes:
+        return name
+    return encoded[:max_bytes].decode('utf-8', errors='ignore').rstrip()
 
 
 def save_json(data: Any, path: Path) -> None:

@@ -152,7 +152,13 @@ def load_chat_from_dir(
         
         print(f"  Combining {len(msg_files)} message file(s)...")
         data = combine_messages(chat_dir)
-    
+        # Persist the combined result so subsequent runs skip re-combining.
+        try:
+            from src.data_combiner import save_combined
+            save_combined(data, chat_dir)
+        except Exception as e:
+            print(f"  Warning: could not save combined_message.json: {e}")
+
     # Normalize
     print(f"  Normalizing (decoding Georgian text, detecting language)...")
     normalized = normalize_chat_from_data(data)
@@ -190,8 +196,9 @@ def load_chats_from_dirs(
         if chat_ids and not any(chat_dir.name.endswith(cid) for cid in chat_ids):
             continue
         
-        # Check if it has message files
-        has_msgs = chat_dir.glob("message_*.json") or (chat_dir / "combined_message.json").exists()
+        # Check if it has message files (glob returns a generator that is always
+        # truthy — must materialise with any(); BUG_REPORT A5)
+        has_msgs = any(chat_dir.glob("message_*.json")) or (chat_dir / "combined_message.json").exists()
         if not has_msgs:
             continue
         

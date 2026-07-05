@@ -4,6 +4,8 @@ from datetime import datetime
 from collections import defaultdict
 from typing import Dict, List, Any
 
+from src.timeutil import to_datetime, DEFAULT_TIMEZONE
+from src.normalizer import is_real_message
 from src.data_loader import load_chat
 from src.language_detection import get_language_distribution
 from src.word_frequency import get_word_frequency
@@ -25,38 +27,60 @@ from src.analyzer_v3 import (
     tit_for_tat_retaliation_score,
     temporal_syncopation_variance
 )
+from src.metrics_v4 import (
+    initiation_metrics,
+    question_metrics,
+    bid_response_metrics,
+    affect_economy_metrics,
+    circadian_metrics,
+    repair_metrics,
+    double_texting_metrics,
+    half_life_metrics,
+    change_point_metrics,
+)
 
 
 class ChatAnalyzer:
     """Analyzer for a single Instagram chat."""
     
-    def __init__(self, chat_data: Dict[str, Any], my_name: str):
+    def __init__(self, chat_data: Dict[str, Any], my_name: str,
+                 timezone: str = DEFAULT_TIMEZONE,
+                 sessions: List[Dict[str, Any]] = None):
         """Initialize the analyzer.
-        
+
         Args:
             chat_data: Parsed JSON data from a chat file
             my_name: Your name in the chat
+            timezone: IANA timezone used to bucket timestamps
+            sessions: Optional chunker sessions (with ``valid`` flags). When
+                provided, the V4 metrics consume the pipeline's own sessions
+                instead of re-deriving them.
         """
         self.chat_data = chat_data
         self.messages = chat_data.get('messages', [])
+        self.timezone = timezone
+        self.sessions = sessions
+        # Real (text) messages only — used by counting metrics so that system
+        # notifications and media events don't inflate core counts (C15).
+        self.real_messages = [m for m in self.messages if is_real_message(m)]
         self.participants = [p['name'] for p in chat_data.get('participants', [])]
         self.my_name = my_name
         self.partner_name = next(
-            (p for p in self.participants if p != my_name), 
+            (p for p in self.participants if p != my_name),
             "Unknown"
         )
     
     def get_messages_by_sender(self) -> Dict[str, List[Dict]]:
-        """Group messages by sender."""
+        """Group real messages by sender."""
         by_sender = defaultdict(list)
-        for msg in self.messages:
+        for msg in self.real_messages:
             sender = msg.get('sender_name', 'Unknown')
             by_sender[sender].append(msg)
         return dict(by_sender)
-    
+
     def get_timestamp(self, msg: Dict) -> datetime:
-        """Convert timestamp_ms to datetime."""
-        return datetime.fromtimestamp(msg['timestamp_ms'] / 1000)
+        """Convert timestamp_ms to a timezone-aware datetime."""
+        return to_datetime(msg['timestamp_ms'], self.timezone)
     
     def _get_chat_info(self) -> Dict[str, Any]:
         """Get basic chat information."""
@@ -89,12 +113,12 @@ class ChatAnalyzer:
         days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 
                 'Friday', 'Saturday', 'Sunday']
         day_counts = {day: 0 for day in days}
-        
-        for msg in self.messages:
+
+        for msg in self.real_messages:
             timestamp = self.get_timestamp(msg)
             day_name = days[timestamp.weekday()]
             day_counts[day_name] += 1
-        
+
         return day_counts
     
     def _get_first_message(self) -> Dict[str, Any]:
@@ -113,36 +137,46 @@ class ChatAnalyzer:
         }
     
     def _get_messages_per_week(self) -> Dict[str, List[float]]:
-        """Get messages per week grouped by year."""
-        if not self.messages:
+        """Get messages per week grouped by ISO year.
+
+        Uses ``isocalendar()`` for BOTH the year and the week so that
+        year-boundary messages (e.g. Dec 29 that belongs to ISO week 1 of the
+        next year) land in the correct bucket. Averages only over the weeks the
+        chat was actually active within each year, not all 53 (BUG_REPORT C14).
+        """
+        if not self.real_messages:
             return {}
-        
-        # Group messages by ISO week
+
+        # Group messages by ISO (year, week)
         weeks = defaultdict(lambda: defaultdict(int))
-        
-        for msg in self.messages:
+
+        for msg in self.real_messages:
             timestamp = self.get_timestamp(msg)
-            year = str(timestamp.year)
-            iso_week = timestamp.isocalendar()[1]
-            weeks[year][iso_week] += 1
-        
-        # Convert to lists and calculate averages
+            iso_year, iso_week, _ = timestamp.isocalendar()
+            weeks[str(iso_year)][iso_week] += 1
+
+        # Convert to lists and calculate averages over the active span only
         result = {}
         for year, week_data in sorted(weeks.items()):
             week_counts = [week_data.get(w, 0) for w in range(1, 54)]
-            avg_per_week = sum(week_counts) / len(week_counts) if week_counts else 0
+            active_weeks = sorted(week_data.keys())
+            if active_weeks:
+                span = active_weeks[-1] - active_weeks[0] + 1
+                avg_per_week = sum(week_data.values()) / span
+            else:
+                avg_per_week = 0
             result[year] = {
                 'weekly_counts': week_counts,
                 'average_per_week': round(avg_per_week, 2)
             }
-        
+
         return result
     
     def _get_yearly_stats(self) -> Dict[str, Dict[str, Any]]:
         """Get yearly statistics."""
         yearly = defaultdict(lambda: {'messages': defaultdict(int), 'total': 0})
-        
-        for msg in self.messages:
+
+        for msg in self.real_messages:
             timestamp = self.get_timestamp(msg)
             year = str(timestamp.year)
             sender = msg.get('sender_name', 'Unknown')
@@ -202,7 +236,7 @@ class ChatAnalyzer:
             
             # V3.0 Advanced Psychological Metrics (14 new metrics)
             'expressive_lengthening_index': expressive_lengthening_index(self.messages, users),
-            'emotional_cooling_alert': emotional_cooling_alert(self.messages, users),
+            'emotional_cooling_alert': emotional_cooling_alert(self.messages, users, timezone=self.timezone),
             'final_word_dominance': final_word_dominance(self.messages, users),
             'thought_fragmentation_index': thought_fragmentation_index(self.messages, users),
             'conversational_entropy': conversational_entropy(self.messages, users),
@@ -215,7 +249,18 @@ class ChatAnalyzer:
             'chaser_retreater_oscillation': chaser_retreater_oscillation(self.messages, users),
             'tit_for_tat_retaliation_score': tit_for_tat_retaliation_score(self.messages, users),
             'temporal_syncopation_variance': temporal_syncopation_variance(self.messages, users),
-            
+
+            # V4 Relationship-dynamics metrics (contract: per_user/series/n)
+            'initiation': initiation_metrics(self.messages, users, self.sessions, self.timezone),
+            'question_asymmetry': question_metrics(self.messages, users, self.sessions, self.timezone),
+            'bid_response': bid_response_metrics(self.messages, users, self.sessions, self.timezone),
+            'affect_economy': affect_economy_metrics(self.messages, users, self.sessions, self.timezone),
+            'circadian': circadian_metrics(self.messages, users, self.sessions, self.timezone),
+            'repair': repair_metrics(self.messages, users, self.sessions, self.timezone),
+            'double_texting': double_texting_metrics(self.messages, users, self.sessions, self.timezone),
+            'half_life': half_life_metrics(self.messages, users, self.sessions, self.timezone),
+            'change_points': change_point_metrics(self.messages, users, self.sessions, self.timezone),
+
             # Store participants for visualizer
             'participants': users
         }

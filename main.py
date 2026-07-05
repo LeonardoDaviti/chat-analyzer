@@ -33,6 +33,7 @@ from src.session_markdown import export_sessions_to_markdown
 from src.analyzer import ChatAnalyzer
 from src.visualizer import ChatVisualizer
 from src.visualizer_v3 import AdvancedMetricsVisualizerV3
+from src.visualizer_v4 import MetricsVisualizerV4
 from src.output_manager import create_output_dir, save_json
 
 
@@ -48,8 +49,9 @@ def discover_all_chats(base_dir: str) -> list[str]:
     for chat_dir in sorted(inbox.iterdir()):
         if not chat_dir.is_dir():
             continue
+        # any() — a glob generator is always truthy (BUG_REPORT A5)
         has_msgs = (
-            chat_dir.glob("message_*.json") or
+            any(chat_dir.glob("message_*.json")) or
             (chat_dir / "combined_message.json").exists()
         )
         if has_msgs:
@@ -88,11 +90,7 @@ def run_chat_pipeline(
     
     data = load_chat_from_dir(chat_dir)
     chat_name = get_chat_name_from_dir(chat_dir)
-    
-    # Update my_name if it was changed by get_chat_name_from_dir
-    if my_name == "drxnem":
-        my_name = "David"  # drxnem is David's handle
-    
+
     print(f"   Chat name: {chat_name}")
     print(f"   Total messages: {len(data.get('messages', []))}")
     
@@ -105,23 +103,32 @@ def run_chat_pipeline(
     sessions = chunk_messages(
         data['messages'],
         my_name,
-        chat_name
+        chat_name,
+        session_gap_hours=session_gap_hours,
+        min_session_messages=min_session_messages,
+        min_session_duration_s=min_session_duration_s,
     )
     session_stats = get_session_statistics(sessions)
-    print(f"   Sessions: {session_stats['total_sessions']}")
-    print(f"   Date range: {session_stats['date_range']['first']} → {session_stats['date_range']['last']}")
+    # session_stats is {} when a chat has no valid sessions (e.g. only a few
+    # scattered messages) — guard all lookups
+    print(f"   Sessions: {session_stats.get('total_sessions', 0)}")
+    if session_stats.get('date_range'):
+        print(f"   Date range: {session_stats['date_range']['first']} → {session_stats['date_range']['last']}")
     if session_stats.get('average_session_duration_minutes'):
         print(f"   Avg duration: {session_stats['average_session_duration_minutes']} min")
     
     # Step 4: Analyze
     print("\n📊 Analyzing...")
-    analyzer = ChatAnalyzer(data, my_name)
+    analyzer = ChatAnalyzer(data, my_name, sessions=sessions)
     analysis = analyzer.analyze()
     
-    # Print key metrics
+    # Print key metrics (derive names from the data, no hardcoding)
     msg_counts = analysis.get('message_counts', {})
     total = sum(msg_counts.values())
-    print(f"   Total: {total} | David: {msg_counts.get('David', 0)} | Other: {msg_counts.get('Mariam Merabishvili', 0) if 'Mariam Merabishvili' in msg_counts else 'N/A'}")
+    partner_name = next((p for p in analysis.get('participants', []) if p != my_name), None)
+    partner_count = msg_counts.get(partner_name, 0) if partner_name else 'N/A'
+    print(f"   Total: {total} | {my_name}: {msg_counts.get(my_name, 0)} | "
+          f"{partner_name or 'Other'}: {partner_count}")
     
     lang = analysis.get('language_distribution', {})
     print(f"   Language: EN={lang.get('english', 0):.1f}% | MIXED={lang.get('mixed', 0):.1f}% | GEORGIAN={lang.get('georgian', 0):.1f}%")
@@ -134,9 +141,11 @@ def run_chat_pipeline(
     viz_dir = str(output_paths['visualizations'])
     visualizer = ChatVisualizer(viz_dir)
     visualizer_v3 = AdvancedMetricsVisualizerV3(viz_dir)
-    
+    visualizer_v4 = MetricsVisualizerV4(viz_dir)
+
     visualizer.generate_all_plots(analysis, chat_name)
     visualizer_v3.generate_all(analysis, chat_name)
+    visualizer_v4.generate_all(analysis, chat_name)
     print(f"   ✓ Generated 22+ charts in {viz_dir}")
     
     # Step 6: Save outputs
@@ -216,7 +225,7 @@ def run_chat_pipeline(
         'processed_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'processing_time_seconds': round(elapsed, 1),
         'total_messages': len(data.get('messages', [])),
-        'valid_sessions': session_stats['total_sessions'],
+        'valid_sessions': session_stats.get('total_sessions', 0),
         'my_name': my_name
     }
     save_json(metadata, output_paths['metadata'])
@@ -240,7 +249,7 @@ def run_chat_pipeline(
         'output_dir': str(output_paths['base']),
         'processing_time': elapsed,
         'messages': len(data.get('messages', [])),
-        'sessions': session_stats['total_sessions'],
+        'sessions': session_stats.get('total_sessions', 0),
         'analysis': analysis,
         'session_stats': session_stats
     }
@@ -256,6 +265,11 @@ def main():
         help='Specific chat(s) to process (comma-separated). If not specified, processes all chats.'
     )
     parser.add_argument(
+        '--exclude', type=str, default=None,
+        help='Chat(s) to skip (comma-separated). A chat is skipped if any value '
+             'appears as a substring of its directory name (mirrors --chat).'
+    )
+    parser.add_argument(
         '--my-name', type=str, default='David',
         help='Your name in the chats (default: David)'
     )
@@ -263,7 +277,7 @@ def main():
         '--output-dir', type=str, default='Outputs',
         help='Base output directory (default: Outputs)'
     )
-    
+
     args = parser.parse_args()
     
     print("=" * 60)
@@ -293,6 +307,19 @@ def main():
         print(f"\n📋 Processing {len(chat_dirs)} chat(s): {[d.split('/')[-1] for d in chat_dirs]}")
     else:
         chat_dirs = all_chat_dirs
+
+    # Exclude by --exclude if specified (substring match on directory name,
+    # mirroring the --chat inclusion logic)
+    if args.exclude:
+        excludes = [c.strip() for c in args.exclude.split(',') if c.strip()]
+        before = len(chat_dirs)
+        chat_dirs = [d for d in chat_dirs if not any(x in d for x in excludes)]
+        skipped = before - len(chat_dirs)
+        if skipped:
+            print(f"\n🚫 Excluded {skipped} chat(s) matching: {args.exclude}")
+        if not chat_dirs:
+            print(f"\n❌ All chats were excluded by: {args.exclude}")
+            sys.exit(1)
     
     # Run pipeline for each chat
     results = []

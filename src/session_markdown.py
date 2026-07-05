@@ -20,24 +20,60 @@ Usage:
 
 import json
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
+
+from src.timeutil import to_datetime
+
+# Break a same-sender group when the in-group gap exceeds this many minutes, so
+# messages days apart don't collapse into "one breath" (BUG_REPORT C16).
+GROUP_BREAK_GAP_MINUTES = 10
+
+
+def _media_placeholder(msg: Dict[str, Any], msg_type: str) -> Optional[str]:
+    """Render a placeholder for a media/system message so it isn't invisible."""
+    if msg_type == 'call':
+        dur = msg.get('call_duration')
+        if isinstance(dur, (int, float)) and dur > 0:
+            minutes = int(dur) // 60
+            if minutes >= 1:
+                return f'[CALL {minutes}min]'
+            return f'[CALL {int(dur)}s]'
+        return '[CALL]'
+    if msg_type == 'photo':
+        return '[PHOTO]'
+    if msg_type == 'video':
+        return '[VIDEO]'
+    if msg_type == 'voice':
+        return '[VOICE]'
+    if msg_type == 'share':
+        return '[SHARE]'
+    if msg_type == 'sticker':
+        return '[STICKER]'
+    return None
 
 
 def group_consecutive_msgs(all_msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Group consecutive messages from the same sender.
-    
+
+    Media/system messages are rendered as placeholders (``[PHOTO]``,
+    ``[CALL 12min]``, ...) rather than dropped, so the LLM transcript reflects
+    the whole exchange. Groups are broken when the calendar day changes OR the
+    time gap between two messages exceeds ``GROUP_BREAK_GAP_MINUTES`` — the first
+    timestamp of a group is then representative (BUG_REPORT C16).
+
     Args:
         all_msgs: List of message dicts sorted by timestamp
-        
+
     Returns:
         List of grouped message dicts with 'parts', 'time', and 'date' keys
     """
     if not all_msgs:
         return []
-    
+
     groups = []
     current = None
-    
+    prev_ts = None
+
     for msg in all_msgs:
         sender = msg.get('sender_name', 'Unknown')
         sender_name = msg.get('sender_name_normalized', sender)
@@ -45,35 +81,46 @@ def group_consecutive_msgs(all_msgs: List[Dict[str, Any]]) -> List[Dict[str, Any
         timestamp_ms = msg.get('timestamp_ms', 0)
         lang = msg.get('language', 'unknown')
         msg_type = msg.get('type', 'text')
-        
-        from datetime import datetime
-        dt = datetime.fromtimestamp(timestamp_ms / 1000) if timestamp_ms else None
+
+        dt = to_datetime(timestamp_ms) if timestamp_ms else None
         time_str = dt.strftime('%H:%M') if dt else ''
         date_str = dt.strftime('%Y-%m-%d') if dt else ''
-        
-        # Determine content
-        if lang == 'system' or msg_type in ('photo', 'video', 'audio_call', 'link'):
-            content = f'[{msg_type.upper()}]' if msg_type != 'text' else content
+
+        # Determine rendered content
+        if lang == 'system':
+            content = None  # system notifications stay out of the transcript
+        elif msg_type != 'text':
+            content = _media_placeholder(msg, msg_type) or (content if content.strip() else None)
         elif not content.strip():
             content = None
-        
+
         if content is None:
+            prev_ts = timestamp_ms  # advance time cursor even for skipped msgs
             continue
-        
-        key = (sender_name,)
-        
-        if current and current['key'] == key:
+
+        # Break the group on sender change, date change, or a large time gap.
+        gap_min = ((timestamp_ms - prev_ts) / 1000 / 60) if prev_ts else 0
+        same_group = (
+            current is not None
+            and current['sender_name'] == sender_name
+            and current['date'] == date_str
+            and gap_min <= GROUP_BREAK_GAP_MINUTES
+        )
+
+        if same_group:
             current['parts'].append(content)
         else:
             current = {
-                'key': key,
+                'key': (sender_name,),
                 'sender_name': sender_name,
                 'parts': [content],
                 'time': time_str,
                 'date': date_str,
             }
             groups.append(current)
-    
+
+        prev_ts = timestamp_ms
+
     return groups
 
 
@@ -99,20 +146,21 @@ def build_session_markdown(
     
     all_msgs = []
     for session in session_group:
-        all_msgs.extend(session.get('real_msgs', []))
-    
+        # Prefer the full message list (incl. media/system) so photos, calls,
+        # etc. are rendered as placeholders instead of vanishing (C16).
+        all_msgs.extend(session.get('all_messages', session.get('real_msgs', [])))
+
     all_msgs.sort(key=lambda m: m.get('timestamp_ms', 0))
-    
+
     if not all_msgs:
         return ""
-    
+
     # Calculate aggregate stats
     first_ts = all_msgs[0].get('timestamp_ms', 0)
     last_ts = all_msgs[-1].get('timestamp_ms', 0)
-    
-    from datetime import datetime
-    start_dt = datetime.fromtimestamp(first_ts / 1000)
-    end_dt = datetime.fromtimestamp(last_ts / 1000)
+
+    start_dt = to_datetime(first_ts)
+    end_dt = to_datetime(last_ts)
     
     duration_minutes = (last_ts - first_ts) / 1000 / 60
     start_time = start_dt.strftime('%H:%M')
@@ -245,7 +293,11 @@ def export_sessions_to_markdown(
     """
     with open(sessions_path, 'r', encoding='utf-8') as f:
         sessions = json.load(f)
-    
+
+    # Micro-interaction sessions are retained in the data (valid=False) but are
+    # excluded from the LLM transcript export.
+    sessions = [s for s in sessions if s.get('valid', True)]
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     

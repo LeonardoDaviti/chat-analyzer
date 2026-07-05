@@ -183,8 +183,9 @@ def get_chat_dirs(base_dir: str, chat_ids: List[str] = None) -> List[Path]:
         if not chat_dir.is_dir():
             continue
         
-        # Check if it has message files
-        if chat_dir.glob("message_*.json") or (chat_dir / "combined_message.json").exists():
+        # Check if it has message files (any() — a glob generator is always
+        # truthy; BUG_REPORT A5)
+        if any(chat_dir.glob("message_*.json")) or (chat_dir / "combined_message.json").exists():
             if chat_ids is None or any(chat_dir.name.endswith(cid) for cid in chat_ids):
                 chat_dirs.append(chat_dir)
     

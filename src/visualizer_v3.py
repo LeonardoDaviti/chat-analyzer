@@ -36,7 +36,11 @@ class AdvancedMetricsVisualizerV3:
             chat_name: Name of the chat for file naming
         """
         print(f"  Generating V3.0 advanced visualizations...")
-        
+
+        # Keep chart filenames within the OS byte limit for long chat titles
+        from src.output_manager import truncate_component
+        chat_name = truncate_component(chat_name, max_bytes=60)
+
         try:
             users = analysis.get('participants', [])
             if not users and 'message_counts' in analysis:
@@ -298,8 +302,12 @@ class AdvancedMetricsVisualizerV3:
             entropies = []
             for month, user_data in sorted(data.items()):
                 if user in user_data:
+                    val = user_data[user]
+                    # New shape: {raw_entropy, normalized_entropy, type_token_ratio}
+                    if isinstance(val, dict):
+                        val = val.get('normalized_entropy', 0)
                     months.append(month)
-                    entropies.append(user_data[user])
+                    entropies.append(val)
             
             if months:
                 ax.plot(months, entropies, marker='o', linewidth=2, markersize=8, label=user)
@@ -404,7 +412,8 @@ class AdvancedMetricsVisualizerV3:
         fig, ax = plt.subplots(figsize=(10, 6))
         
         topics = list(data.keys())
-        delays = [data[t]['delay_multiplier'] for t in topics]
+        # New metric shape uses 'z_score' (old runs used 'delay_multiplier')
+        delays = [data[t].get('z_score', data[t].get('delay_multiplier', 0)) for t in topics]
         
         colors = ['red' if d > 5 else 'orange' if d > 3 else 'yellow' for d in delays]
         bars = ax.bar(topics, delays, color=colors, edgecolor='black')
@@ -451,12 +460,21 @@ class AdvancedMetricsVisualizerV3:
         plt.savefig(self.output_dir / f'{chat_name}_v3_gini_coefficient.png', dpi=150, bbox_inches='tight')
         plt.close()
     
-    def _plot_inertia(self, data: float, chat_name: str):
+    def _plot_inertia(self, data, chat_name: str):
         """Plot conversational inertia."""
         fig, ax = plt.subplots(figsize=(10, 6))
-        
+
+        # New shape: {user: {avg_restart_effort, failed_restarts, answered_restarts}}
+        if isinstance(data, dict):
+            efforts = [v.get('avg_restart_effort', 0) for v in data.values()
+                       if isinstance(v, dict)]
+            value = max(efforts) if efforts else 0
+        else:
+            value = data
+        data = value
+
         # Gauge-like visualization
-        ax.text(0.5, 0.7, f'{data:.0f}', ha='center', va='center', 
+        ax.text(0.5, 0.7, f'{data:.0f}', ha='center', va='center',
                fontsize=48, fontweight='bold', color='darkblue')
         ax.text(0.5, 0.5, 'Average Characters', ha='center', va='center', fontsize=14)
         ax.text(0.5, 0.4, 'Needed to Restart', ha='center', va='center', fontsize=14)
@@ -522,10 +540,16 @@ class AdvancedMetricsVisualizerV3:
             return
         
         fig, ax = plt.subplots(figsize=(12, 6))
-        
-        dates = list(data.keys())
-        correlations = [data[d]['correlation'] for d in dates]
-        
+
+        # New shape: {"series": [{date, correlation}], "crossings": {...}}
+        if isinstance(data, dict) and 'series' in data:
+            series = data['series']
+            dates = [pt['date'] for pt in series]
+            correlations = [pt['correlation'] for pt in series]
+        else:
+            dates = list(data.keys())
+            correlations = [data[d]['correlation'] for d in dates]
+
         ax.plot(dates, correlations, marker='o', linewidth=2, markersize=8, color='red')
         ax.set_ylabel('Pearson Correlation')
         ax.set_title('Chaser/Retreater Oscillation\n(Negative correlation = anxious-avoidant pattern)', fontsize=14, fontweight='bold')
@@ -682,9 +706,12 @@ class AdvancedMetricsVisualizerV3:
         if 'chaser_retreater_oscillation' in analysis:
             cr_data = analysis['chaser_retreater_oscillation']
             if cr_data:
-                # Keys are YYYY-MM-DD date strings
-                dates = list(cr_data.keys())
-                correlations = [cr_data[d]['correlation'] for d in cr_data]
+                if isinstance(cr_data, dict) and 'series' in cr_data:
+                    dates = [pt['date'] for pt in cr_data['series']]
+                    correlations = [pt['correlation'] for pt in cr_data['series']]
+                else:
+                    dates = list(cr_data.keys())
+                    correlations = [cr_data[d]['correlation'] for d in cr_data]
                 ax8.plot(dates, correlations, marker='o', color='red', linewidth=2)
                 ax8.axhline(y=-0.6, color='orange', linestyle='--')
                 ax8.set_title('Chaser/Retreater\n(Correlation)', fontsize=10)
@@ -709,6 +736,10 @@ class AdvancedMetricsVisualizerV3:
         
         if 'conversational_inertia' in analysis:
             inertia = analysis['conversational_inertia']
+            if isinstance(inertia, dict):
+                efforts = [v.get('avg_restart_effort', 0) for v in inertia.values()
+                           if isinstance(v, dict)]
+                inertia = max(efforts) if efforts else 0
             summary_text += f"[lightning] Inertia: {inertia:.0f} chars\n"
         
         ax9.text(0.1, 0.5, summary_text, transform=ax9.transAxes, fontsize=11,
