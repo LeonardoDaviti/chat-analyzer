@@ -79,7 +79,7 @@ Download this project as a ZIP from its page (green **Code** button →
 **Download ZIP**) and unzip it, or, if you know git:
 
 ```
-git clone <the-project-url>
+git clone https://github.com/LeonardoDaviti/chat-analyzer.git
 ```
 
 Then, in your terminal, go into the project folder. For example:
