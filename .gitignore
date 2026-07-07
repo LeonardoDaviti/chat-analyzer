@@ -26,3 +26,7 @@ Thumbs.db
 # Analysis cache / temp files
 *.cache
 normalized_cache.json
+
+# Generated research / analysis docs
+docs/COMPETITIVE_ANALYSIS.md
+group_chat_schema_report.md
