@@ -285,7 +285,8 @@ def run_chat_pipeline(
     output_base: str,
     session_gap_hours: float = 2.0,
     min_session_messages: int = 3,
-    min_session_duration_s: int = 30
+    min_session_duration_s: int = 30,
+    skip_visualizations: bool = False
 ) -> dict:
     """Run the full analysis pipeline for a single chat.
     
@@ -367,17 +368,20 @@ def run_chat_pipeline(
         rt = analysis.get('response_times', {})
         print(f"   Response time: {my_name}={rt.get('my_avg_response_minutes', 0):.1f}min | Other={rt.get('partner_avg_response_minutes', 0):.1f}min")
     
-    # Step 5: Generate visualizations
-    print("\n📈 Generating visualizations...")
-    viz_dir = str(output_paths['visualizations'])
-    visualizer = ChatVisualizer(viz_dir)
-    visualizer_v3 = AdvancedMetricsVisualizerV3(viz_dir)
-    visualizer_v4 = MetricsVisualizerV4(viz_dir)
+    # Step 5: Generate visualizations (optional — dashboard reads JSON directly)
+    if not skip_visualizations:
+        print("\n📈 Generating visualizations...")
+        viz_dir = str(output_paths['visualizations'])
+        visualizer = ChatVisualizer(viz_dir)
+        visualizer_v3 = AdvancedMetricsVisualizerV3(viz_dir)
+        visualizer_v4 = MetricsVisualizerV4(viz_dir)
 
-    visualizer.generate_all_plots(analysis, chat_name)
-    visualizer_v3.generate_all(analysis, chat_name)
-    visualizer_v4.generate_all(analysis, chat_name)
-    print(f"   ✓ Generated 22+ charts in {viz_dir}")
+        visualizer.generate_all_plots(analysis, chat_name)
+        visualizer_v3.generate_all(analysis, chat_name)
+        visualizer_v4.generate_all(analysis, chat_name)
+        print(f"   ✓ Generated 22+ charts in {viz_dir}")
+    else:
+        print("\n📈 Skipping PNG charts (--no-visualizations). Dashboard reads JSON data directly.")
     
     # Step 6: Save outputs
     print("\n💾 Saving outputs...")
@@ -514,6 +518,10 @@ def main():
         help='Extract an Instagram export zip into Chats/<zipname>/ and exit. '
              'Run this once before analysing.'
     )
+    parser.add_argument(
+        '--no-visualizations', action='store_true',
+        help='Skip PNG chart generation (faster; dashboard reads JSON data directly)'
+    )
 
     args = parser.parse_args()
 
@@ -596,7 +604,8 @@ def main():
             result = run_chat_pipeline(
                 chat_dir=chat_dir,
                 my_name=my_name,
-                output_base=args.output_dir
+                output_base=args.output_dir,
+                skip_visualizations=args.no_visualizations
             )
             results.append(result)
         except Exception as e:
