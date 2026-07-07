@@ -177,7 +177,9 @@ def build_session_markdown(
     # Legend
     legend = {}
     for name in sorted(sender_counts.keys()):
-        legend[name] = name[0].upper()
+        # Guard empty sender names (e.g. Telegram messages from deleted accounts
+        # with a null ``from``) so the initial-letter legend never index-errors.
+        legend[name] = name[0].upper() if name else '?'
     
     # Group consecutive messages
     grouped = group_consecutive_msgs(all_msgs)

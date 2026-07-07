@@ -141,6 +141,9 @@ def _blank_day() -> Dict[str, Any]:
         'we_words': 0, 'i_words': 0, 'you_words': 0,
         'pos_words': 0, 'neg_words': 0,
         'gratitude': 0, 'apology': 0,
+        # Telegram-only: edited real messages this day (always 0 for Instagram,
+        # whose messages never carry an edited_ms field).
+        'edits': 0,
     }
 
 
@@ -244,6 +247,8 @@ def build_daily_aggregates(messages: List[Dict[str, Any]],
             c['questions'] += 1
         if dt.hour in NIGHT_HOURS:
             c['night_msgs'] += 1
+        if m.get('edited_ms'):        # Telegram: this message was edited
+            c['edits'] += 1
         c['hours'][dt.hour] += 1
 
     # --- Reactions + media (ALL messages) ---------------------------------- #
@@ -661,6 +666,96 @@ def _change_points(analysis: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------- #
+# Telegram-exclusive signals (computed only when the data is present)
+# --------------------------------------------------------------------------- #
+
+def has_telegram_fields(messages: List[Dict[str, Any]]) -> bool:
+    """True if any message carries Telegram-only structure (msg_id present).
+
+    Instagram messages never have ``msg_id`` / ``edited_ms`` / ``reply_to_id`` /
+    ``entities``, so gating on this leaves Instagram chats completely unaffected.
+    """
+    for m in messages:
+        if m.get('msg_id') is not None or 'entities' in m or 'edited_ms' in m \
+                or 'reply_to_id' in m:
+            return True
+    return False
+
+
+def build_telegram_signals(messages: List[Dict[str, Any]],
+                           participants: List[str]) -> Dict[str, Any]:
+    """Telegram-exclusive per-user signals (gated on field presence).
+
+    Returns per-user edit rate, explicit-reply share, forward share and lifetime
+    entity mix (links / hashtags / mentions), plus a reply-depth histogram
+    derived by following ``reply_to_id`` chains.
+    """
+    user_set = set(participants)
+    stats = {u: {'msgs': 0, 'edits': 0, 'replies': 0, 'forwards': 0,
+                 'links': 0, 'hashtags': 0, 'mentions': 0} for u in participants}
+
+    by_id: Dict[Any, Dict[str, Any]] = {}
+    for m in messages:
+        mid = m.get('msg_id')
+        if mid is not None:
+            by_id[mid] = m
+
+    real = [m for m in messages
+            if is_real_message(m) and m.get('sender_name') in user_set]
+
+    for m in real:
+        s = stats[m['sender_name']]
+        s['msgs'] += 1
+        if m.get('edited_ms'):
+            s['edits'] += 1
+        if m.get('reply_to_id') is not None:
+            s['replies'] += 1
+        if m.get('forwarded_from'):
+            s['forwards'] += 1
+        ent = m.get('entities') or {}
+        s['links'] += int(ent.get('link', 0)) + int(ent.get('text_link', 0))
+        s['hashtags'] += int(ent.get('hashtag', 0))
+        s['mentions'] += int(ent.get('mention', 0))
+
+    # ---- reply-depth histogram (follow reply_to_id chains) ----------------- #
+    depth_cache: Dict[Any, int] = {}
+
+    def _depth(mid: Any, guard: int = 0) -> int:
+        if mid in depth_cache:
+            return depth_cache[mid]
+        m = by_id.get(mid)
+        if not m or guard > 200:
+            return 0
+        parent = m.get('reply_to_id')
+        d = 1 + _depth(parent, guard + 1) if (parent is not None and parent in by_id) else 0
+        depth_cache[mid] = d
+        return d
+
+    depth_hist: Counter = Counter()
+    for m in real:
+        if m.get('reply_to_id') is not None:
+            d = _depth(m.get('msg_id'))
+            depth_hist['6+' if d >= 6 else str(d)] += 1
+
+    per_user: Dict[str, Any] = {}
+    for u in participants:
+        s = stats[u]
+        n = s['msgs'] or 1
+        per_user[u] = {
+            'msgs': s['msgs'],
+            'edits': s['edits'],
+            'edit_rate': round(s['edits'] / n, 4),
+            'reply_share': round(s['replies'] / n, 4),
+            'forward_share': round(s['forwards'] / n, 4),
+            'links': s['links'],
+            'hashtags': s['hashtags'],
+            'mentions': s['mentions'],
+        }
+
+    return {'per_user': per_user, 'reply_depth': dict(depth_hist)}
+
+
+# --------------------------------------------------------------------------- #
 # Payload assembly
 # --------------------------------------------------------------------------- #
 
@@ -678,6 +773,9 @@ def build_chat_payload(name: str,
         nm = decode_georgian_text(p.get('name', '') if isinstance(p, dict) else str(p))
         if nm:
             fallback.append(nm)
+
+    platform = (normalized.get('platform') if isinstance(normalized, dict) else None) \
+        or 'instagram'
 
     group_metrics = analysis.get('group_metrics') if isinstance(analysis, dict) else None
     is_group = bool(group_metrics) or len(fallback) >= 3
@@ -703,8 +801,9 @@ def build_chat_payload(name: str,
                 gm.get('reaction_matrix', {}), participants, others_key),
             'member_stats': member_stats,
         }
-        return {
+        group_payload = {
             'name': name,
+            'platform': platform,
             'participants': participants,
             'is_group': True,
             'member_count': analysis.get('member_count', len(fallback)),
@@ -714,12 +813,16 @@ def build_chat_payload(name: str,
             'extras': build_group_extras(messages, participants, timezone),
             'group': group_block,
         }
+        if has_telegram_fields(messages):
+            group_payload['telegram'] = build_telegram_signals(messages, participants)
+        return group_payload
 
     participants = choose_participants(messages, fallback)
     daily = build_daily_aggregates(messages, participants, timezone)
 
-    return {
+    payload = {
         'name': name,
+        'platform': platform,
         'participants': participants,
         'is_group': False,
         'daily': daily,
@@ -727,6 +830,9 @@ def build_chat_payload(name: str,
         'lifetime': build_lifetime(analysis),
         'extras': build_extras(messages, participants, timezone),
     }
+    if has_telegram_fields(messages):
+        payload['telegram'] = build_telegram_signals(messages, participants)
+    return payload
 
 
 # --------------------------------------------------------------------------- #
@@ -879,6 +985,7 @@ def run_export(output_dir: str = 'Outputs',
             'last_date': dates[-1] if dates else None,
             'is_group': bool(payload.get('is_group')),
             'members': payload.get('member_count', 0) if payload.get('is_group') else 0,
+            'platform': payload.get('platform', 'instagram'),
         })
         summary_rows.append({
             'chat': name,

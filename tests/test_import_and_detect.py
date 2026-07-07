@@ -39,8 +39,8 @@ def test_import_zip_extracts_and_counts(tmp_path):
 
     inbox = Path(target).joinpath(*main._INBOX_SUFFIX)
     assert inbox.exists()
-    # extracted under Chats/<zipname>/
-    assert Path(target) == tmp_path / "Chats" / "instagram-export-2026"
+    # extracted under Chats/Instagram/<zipname>/ (platform-separated layout)
+    assert Path(target) == tmp_path / "Chats" / "Instagram" / "instagram-export-2026"
     assert (inbox / "alice_123" / "message_1.json").exists()
     assert (inbox / "bob_456" / "message_1.json").exists()
 

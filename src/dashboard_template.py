@@ -61,6 +61,9 @@ select:focus,input:focus,.dd-btn:focus{border-color:var(--a)}
   justify-content:space-between;gap:10px}
 .dd-item:hover,.dd-item.active{background:var(--panel-2)}
 .dd-item .n{color:var(--faint);font-variant-numeric:tabular-nums}
+.dd-item.connected{border:1px solid var(--a);background:rgba(77,182,172,.08);
+  font-weight:600;margin-bottom:6px}
+.dd-item.connected:hover,.dd-item.connected.active{background:rgba(77,182,172,.16)}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 .chip{padding:5px 10px;border-radius:14px;border:1px solid var(--border);
   background:var(--panel);color:var(--muted);cursor:pointer;font-size:12px;user-select:none}
@@ -145,6 +148,10 @@ select:focus,input:focus,.dd-btn:focus{border-color:var(--a)}
         </div>
       </div>
     </div>
+    <div class="control" id="platformControl" style="display:none">
+      <label>Platform</label>
+      <div class="chips" id="platformSeg"></div>
+    </div>
     <div class="control">
       <label>Time range</label>
       <div class="chips" id="presetChips"></div>
@@ -202,6 +209,7 @@ var DATA = window.DASHBOARD_DATA = window.DASHBOARD_DATA || {};
 
 var state = {
   chatId:null, chat:null, isGroup:false,
+  isConnected:false, connected:null,   // owner cross-chat ("You — Connected") mode
   users:[null,null],
   fullStart:null, fullEnd:null,   // Date objects (chat extent)
   start:null, end:null,           // Date objects (active range)
@@ -249,7 +257,8 @@ function blank(){return {msgs:0,words:0,chars:0,emoji:0,questions:0,night_msgs:0
   reactions_given:0,reactions_received:0,media:0,photos:0,videos:0,voice:0,shares:0,
   turns:0,turns_answered:0,endings:0,self_restarts:0,reacted_leave:0,
   wait_reply_sum_min:0,wait_reply_n:0,resp_lat_sum_min:0,resp_lat_n:0,initiations:0,
-  we_words:0,i_words:0,you_words:0,pos_words:0,neg_words:0,gratitude:0,apology:0};}
+  we_words:0,i_words:0,you_words:0,pos_words:0,neg_words:0,gratitude:0,apology:0,
+  edits:0};}
 function addInto(acc,cell){
   for(var k in acc){ if(cell[k]!=null) acc[k]+=cell[k]; }
 }
@@ -387,11 +396,71 @@ function renderSkeleton(){
       + '</div>')
   + section('Language',
       '<div class="grid cols-2" id="nlpCards"></div>')
+  + telegramSection()
   + section('Shifts vs previous period',
       card('What changed','Every metric that moved, current range compared to the previous window of equal length',
         '<div class="diff" id="shiftList"></div>'))
   + section('All-time lifetime metrics',
       '<div class="grid cols-2" id="ltCards"></div>');
+}
+/* Telegram-only section — rendered only when the loaded chat carries Telegram
+   signals. Instagram chats get an empty string, so their layout is unchanged. */
+function telegramSection(){
+  if(!state.chat||!state.chat.telegram) return '';
+  return section('Telegram signals',
+    '<div class="grid cols-2">'
+    + card('Edit rate','Share of messages later edited — a "second-guessing index" (in range)','<div class="chart" id="cTgEdit"></div>')
+    + card('Reply share','Share of messages that are explicit replies (all-time)','<div class="chart" id="cTgReply"></div>')
+    + card('Reply depth','How deep reply chains go (count of replies at each chain depth)','<div class="chart" id="cTgDepth"></div>')
+    + card('Forward share','Share of messages that are forwards (all-time)','<div class="chart" id="cTgForward"></div>')
+    + card('Entity mix','Links, hashtags and mentions used per person (all-time)','<div class="chart" id="cTgEntities"></div>')
+    + '</div>');
+}
+function renderTelegram(rt){
+  if(!state.chat||!state.chat.telegram) return;
+  var A=state.users[0], B=state.users[1];
+  var tg=state.chat.telegram, pu=tg.per_user||{};
+  var pa=pu[A]||{}, pb=pu[B]||{};
+  var names=[A,B], cols=[COLORS.a,COLORS.b];
+  function barPct(id,va,vb,unit){
+    setChart(id,{grid:baseGrid(),tooltip:{trigger:'axis',backgroundColor:PANEL,
+      borderColor:GRID,textStyle:{color:TEXT}},
+      xAxis:{type:'category',data:names,axisLine:{lineStyle:{color:GRID}},axisLabel:{color:MUTED}},
+      yAxis:valAxis({axisLabel:{color:MUTED,formatter:'{value}'+(unit||'')}}),
+      series:[{type:'bar',data:[{value:va,itemStyle:{color:cols[0]}},
+        {value:vb,itemStyle:{color:cols[1]}}],barMaxWidth:60,
+        label:{show:true,position:'top',color:TEXT,formatter:function(o){return fmtNum(o.value)+(unit||'');}}}]});
+  }
+  // Edit rate — range-scoped (edits/msgs from the daily table).
+  var ea=rt&&rt.tot&&rt.tot.A?rt.tot.A:{msgs:0,edits:0};
+  var eb=rt&&rt.tot&&rt.tot.B?rt.tot.B:{msgs:0,edits:0};
+  barPct('cTgEdit', ea.msgs?+(ea.edits/ea.msgs*100).toFixed(1):0,
+                    eb.msgs?+(eb.edits/eb.msgs*100).toFixed(1):0, '%');
+  barPct('cTgReply', +((pa.reply_share||0)*100).toFixed(1), +((pb.reply_share||0)*100).toFixed(1), '%');
+  barPct('cTgForward', +((pa.forward_share||0)*100).toFixed(1), +((pb.forward_share||0)*100).toFixed(1), '%');
+  // Reply depth histogram.
+  var rd=tg.reply_depth||{};
+  var order=['1','2','3','4','5','6+'];
+  var dk=order.filter(function(k){return rd[k]!=null;});
+  if(!dk.length) dk=Object.keys(rd).sort();
+  setChart('cTgDepth',{grid:baseGrid(),tooltip:{trigger:'axis',backgroundColor:PANEL,
+    borderColor:GRID,textStyle:{color:TEXT}},
+    xAxis:{type:'category',data:dk,name:'depth',nameTextStyle:{color:MUTED},
+      axisLine:{lineStyle:{color:GRID}},axisLabel:{color:MUTED}},
+    yAxis:valAxis({}),
+    series:[{type:'bar',data:dk.map(function(k){return rd[k];}),
+      itemStyle:{color:COLORS.a},barMaxWidth:40}]});
+  // Entity mix — grouped bars per person.
+  setChart('cTgEntities',{grid:baseGrid(),legend:legend(names),
+    tooltip:{trigger:'axis',backgroundColor:PANEL,borderColor:GRID,textStyle:{color:TEXT}},
+    xAxis:{type:'category',data:['Links','Hashtags','Mentions'],
+      axisLine:{lineStyle:{color:GRID}},axisLabel:{color:MUTED}},
+    yAxis:valAxis({}),
+    series:[
+      {name:A,type:'bar',itemStyle:{color:COLORS.a},
+        data:[pa.links||0,pa.hashtags||0,pa.mentions||0]},
+      {name:B,type:'bar',itemStyle:{color:COLORS.b},
+        data:[pb.links||0,pb.hashtags||0,pb.mentions||0]}]});
 }
 function section(title,inner){return '<div class="section"><div class="section-title">'+esc(title)+'</div>'+inner+'</div>';}
 function card(title,sub,inner){return '<div class="card"><h3>'+esc(title)+'</h3>'
@@ -419,6 +488,7 @@ function renderAll(){
   safe(function(){renderEndings(b,rt);},'endings');
   safe(function(){renderPsycho(b,rt);},'psycho');
   safe(renderLanguage,'language');
+  safe(function(){renderTelegram(rt);},'telegram');
   safe(function(){renderShifts(rt);},'shifts');
   // Lifetime + turn-hist cards are range-independent; rendered per chat.
 }
@@ -1668,7 +1738,421 @@ function renderGroupShifts(rt,members){
 }
 
 /* Dispatch between the 1v1 and group render pipelines. */
-function rerender(){ if(state.isGroup) renderAllGroup(); else renderAll(); }
+function rerender(){
+  if(state.isConnected) renderAllConnected();
+  else if(state.isGroup) renderAllGroup();
+  else renderAll();
+}
+
+/* ============================================================ *
+ * CONNECTED (owner) mode — "👤 You — Connected"
+ * Renders window.CONNECTED (built by build_connected.py): the owner's
+ * cross-chat profile. Range-scoped charts derive from the flat per-day
+ * owner table; leaderboards/funnel/code-switching are all-time.
+ * ============================================================ */
+var CONN_TYPE_COLORS={ping:'#6b7076',exchange:'#4DB6AC',hangout:'#E4A11B',deep_talk:'#B5179E'};
+var CONN_TYPES=['ping','exchange','hangout','deep_talk'];
+var CONN_TYPE_LBL={ping:'Ping',exchange:'Exchange',hangout:'Hangout',deep_talk:'Deep talk'};
+
+function connBlank(){return {msgs:0,received:0,words:0,chars:0,emoji:0,questions:0,
+  night_msgs:0,media:0,i_words:0,we_words:0,you_words:0,pos_words:0,neg_words:0,
+  sessions:0,texting_minutes:0,bursts:0};}
+function connEntries(){ // sorted [dateStr, cell]
+  var d=state.connected.daily,ks=Object.keys(d).sort(),o=[];
+  for(var i=0;i<ks.length;i++)o.push([ks[i],d[ks[i]]]);
+  return o;
+}
+function connRangeTotals(sD,eD){
+  var t=connBlank(),ents=connEntries(),daysActive=0;
+  for(var i=0;i<ents.length;i++){
+    var ts=parseYMD(ents[i][0]).getTime();
+    if(ts<sD.getTime()||ts>eD.getTime()) continue;
+    addInto(t,ents[i][1]);
+    if(ents[i][1].msgs) daysActive++;
+  }
+  return {tot:t,daysActive:daysActive};
+}
+function connBuckets(){
+  var gran=effGran(),map={},ents=connEntries();
+  for(var i=0;i<ents.length;i++){
+    var ds=ents[i][0]; if(!inRange(ds)) continue;
+    var bs=bucketStart(ds,gran);
+    if(!map[bs]) map[bs]=connBlank();
+    addInto(map[bs],ents[i][1]);
+  }
+  var starts=Object.keys(map).sort();
+  return {starts:starts,ts:starts.map(function(s){return parseYMD(s).getTime();}),
+    rows:starts.map(function(s){return map[s];}),gran:gran};
+}
+function connMonthKeys(series){ // series keys 'YYYY-MM' clipped to active range
+  var sm=ymd(state.start).slice(0,7), em=ymd(state.end).slice(0,7);
+  return Object.keys(series||{}).filter(function(m){return m>=sm&&m<=em;}).sort();
+}
+function isoWeekStartDate(label){ // 'YYYY-Www' -> Date of that ISO week's Monday
+  var y=+label.slice(0,4), w=+label.slice(6);
+  var jan4=new Date(Date.UTC(y,0,4));
+  var wd=(jan4.getUTCDay()+6)%7;
+  return addDays(jan4,-wd+(w-1)*7);
+}
+function connWeekKeys(series){ // weekly keys whose week overlaps the active range
+  return Object.keys(series||{}).filter(function(k){
+    var t=isoWeekStartDate(k).getTime();
+    return t>=state.start.getTime()-6*86400000 && t<=state.end.getTime();
+  }).sort();
+}
+
+function renderSkeletonConnected(){
+  var owner=state.connected.owner||'You';
+  el('app').innerHTML =
+  section('Pulse — '+owner+' across every chat','<div class="grid kpis" id="kpiRow"></div>')
+  + section('Attention & texting span',
+      '<div class="grid cols-2">'
+      + card('Time spent texting','Sum of conversation-session minutes you took part in, any chat (per bucket)','<div class="chart" id="cxTexting"></div>')
+      + card('Engagement bursts','Runs of your messages across ALL chats with gaps under 15 min (bursts started per bucket)','<div class="chart" id="cxBursts"></div>')
+      + card('Burst length trend','Median burst duration per month, minutes (all-time series, clipped to range)','<div class="chart" id="cxBurstDur"></div>')
+      + card('Focus vs juggling','Your active 10-min windows: one chat vs several at once · plus chat-switch rate (all-time)','<div class="chart" id="cxFocus"></div>')
+      + '</div>')
+  + section('Session portfolio',
+      '<div class="grid cols-2">'
+      + card('Conversation type mix','ping / exchange / hangout / deep talk per month (all chats, clipped to range)','<div class="chart" id="cxTypeMix"></div>')
+      + card('Deep talks per week','Long sessions with long turns + questions or self-disclosure (clipped to range)','<div class="chart" id="cxDeep"></div>')
+      + '</div>')
+  + section('Contact leaderboards · all-time',
+      '<div class="grid cols-2">'
+      + card('Where your messages go','Share of everything you ever sent · top 12 + others (all-time)','<div class="chart tall" id="cxSentL"></div>')
+      + card('Attention hierarchy','Your median reply latency per contact, fastest first · only contacts with ≥50 replies (all-time)','<div class="chart tall" id="cxLatL"></div>')
+      + card('Initiation asymmetry','Share of conversations YOU started with each contact (all-time, volume-gated)','<div class="chart tall" id="cxInitL"></div>')
+      + card('Night ownership','Who receives your 00:00–06:00 messages (all-time)','<div class="chart tall" id="cxNightL"></div>')
+      + card('Openness','Your words per turn with each contact — where you talk in paragraphs vs monosyllables (all-time, volume-gated)','<div class="chart tall" id="cxOpenL"></div>')
+      + card('Style mirroring & code-switching','How much your texting style shape-shifts between contacts (all-time)','<div id="connMirrorBox" style="min-height:200px"></div>')
+      + '</div>')
+  + section('Social portfolio dynamics',
+      '<div class="grid cols-2">'
+      + card('Attention concentration (Gini)','0 = attention spread evenly · 1 = one contact gets everything (monthly, clipped to range)','<div class="chart" id="cxGini"></div>')
+      + card('Active · churned · reactivated contacts','Monthly counts (churn = silent for the next two months; clipped to range)','<div class="chart" id="cxDyn"></div>')
+      + card('Reciprocity','Messages you send vs receive — biggest surpluses (you over-invest) and deficits (all-time)','<div id="connRecipBox" style="min-height:180px"></div>')
+      + '</div>')
+  + section('New-contact funnel · all-time',
+      '<div class="grid cols-2">'
+      + card('Met → talked again → recurring','Only accepted, still-existing chats are visible — rejected or deleted requests are not (survivorship bias)','<div class="chart" id="cxFunnel"></div>')
+      + card('New contacts per month','A chat’s first-ever message · split by who texted first (clipped to range)','<div class="chart" id="cxNewC"></div>')
+      + '</div>')
+  + section('Groups lane',
+      card('Group chats','Kept separate so groups never pollute the contact rankings (all-time)','<div id="connGroupsBox" style="min-height:80px"></div>'));
+}
+
+function renderAllConnected(){
+  if(!state.connected) return;
+  var b=connBuckets();
+  var rt=connRangeTotals(state.start,state.end);
+  var has=b.starts.length>0;
+  safe(function(){renderConnKPIs(rt,has);},'ckpi');
+  safe(function(){renderConnTexting(b);},'ctexting');
+  safe(function(){renderConnBursts(b);},'cbursts');
+  safe(renderConnBurstDur,'cburstdur');
+  safe(renderConnFocus,'cfocus');
+  safe(renderConnTypeMix,'ctypemix');
+  safe(renderConnDeep,'cdeep');
+  safe(renderConnLeaderboards,'clead');
+  safe(renderConnGini,'cgini');
+  safe(renderConnDyn,'cdyn');
+  safe(renderConnRecip,'crecip');
+  safe(renderConnFunnel,'cfunnel');
+  safe(renderConnNewContacts,'cnewc');
+  safe(renderConnGroups,'cgroups');
+}
+
+function renderConnKPIs(rt,has){
+  var c=state.connected, tot=rt.tot;
+  var days=dayDiff(state.start,state.end)+1;
+  var prevEnd=addDays(state.start,-1), prevStart=addDays(state.start,-days);
+  var prev=connRangeTotals(prevStart,prevEnd).tot;
+  var hasPrev=prev.msgs>0;
+  function D(v,opts){ if(!hasPrev||v==null||!isFinite(v)) return null;
+    var o=opts||{}; return {v:v,invert:!!o.invert,pp:!!o.pp}; }
+
+  // deep talks in range (weekly series, weeks overlapping range)
+  var deepW=c.weekly&&c.weekly.deep_talk||{};
+  var deepN=0; connWeekKeys(deepW).forEach(function(k){deepN+=deepW[k];});
+  var burstsPerDay=rt.daysActive?tot.bursts/rt.daysActive:null;
+  // contacts active in range (all-time first/last day overlap)
+  var sr=ymd(state.start), er=ymd(state.end);
+  var activeContacts=(c.contacts||[]).filter(function(x){
+    return x.first_day&&x.last_day&&x.first_day<=er&&x.last_day>=sr;}).length;
+  var att=c.attention||{}, ab=att.bursts||{}, ad=(ab.duration_min||{});
+
+  var tiles=[
+    kpi('Time texting',fmtDur(tot.texting_minutes),
+      D(relDelta(tot.texting_minutes,prev.texting_minutes)),
+      '<span class="split faint">'+fmtNum(tot.sessions)+' sessions · vs prev '+days+'d</span>'),
+    kpi('Messages sent',fmtNum(tot.msgs),
+      D(relDelta(tot.msgs,prev.msgs)),
+      '<span class="split faint">received '+fmtNum(tot.received)+'</span>'),
+    kpi('Deep talks',fmtNum(deepN),null,
+      '<span class="split faint">'+fmtNum(deepN/Math.max(1,days/7))+' / week in range</span>'),
+    kpi('Bursts / active day',burstsPerDay==null?'—':fmtNum(burstsPerDay),
+      D(relDelta(tot.bursts,prev.bursts)),
+      '<span class="split faint">'+fmtNum(tot.bursts)+' bursts in range</span>'),
+    kpi('Median texting span',fmtDur(ad.median),null,
+      '<span class="split faint">p90 '+fmtDur(ad.p90)+' · all-time</span>'),
+    kpi('Parallel texting',fmtPct(att.parallel_texting_rate,1),null,
+      '<span class="split faint">windows with ≥2 chats · all-time</span>'),
+    kpi('Active contacts',fmtNum(activeContacts),null,
+      '<span class="split faint">span overlaps range · '+fmtNum((c.totals||{}).contacts)+' all-time</span>'),
+    kpi('Night messages',fmtNum(tot.night_msgs),
+      D(relDelta(tot.night_msgs,prev.night_msgs)),
+      '<span class="split faint">00:00–06:00</span>')
+  ];
+  el('kpiRow').innerHTML=has?tiles.join(''):'<div class="kpi"><div class="placeholder">No data in range</div></div>';
+}
+
+function renderConnTexting(b){
+  if(!b.starts.length){ noData('cxTexting'); return; }
+  ensureCanvas('cxTexting');
+  setChart('cxTexting',{grid:baseGrid(),tooltip:Object.assign(tooltipBase(),{
+    formatter:function(ps){var d=new Date(ps[0].value[0]);
+      var s=esc(fmtDate(d))+'<br>';
+      ps.forEach(function(p){s+=markDot(p.color)+esc(p.seriesName)+': <b>'+fmtDur(p.value[1])+'</b><br>';});
+      return s;}}),
+    xAxis:timeAxis(),yAxis:valAxis({axisLabel:{color:MUTED,formatter:function(v){return fmtNum(v)+'m';}}}),
+    series:[{name:'Texting minutes',type:'line',showSymbol:false,
+      data:b.starts.map(function(s,i){return [b.ts[i],Math.round(b.rows[i].texting_minutes)];}),
+      lineStyle:{width:1.5,color:COLORS.a},itemStyle:{color:COLORS.a},
+      areaStyle:{color:COLORS.a,opacity:.22}}]});
+}
+function renderConnBursts(b){
+  if(!b.starts.length){ noData('cxBursts'); return; }
+  ensureCanvas('cxBursts');
+  setChart('cxBursts',{grid:baseGrid(),tooltip:tooltipBase(),
+    xAxis:timeAxis(),yAxis:valAxis({}),
+    series:[{name:'Bursts',type:'bar',barMaxWidth:14,
+      data:b.starts.map(function(s,i){return [b.ts[i],b.rows[i].bursts];}),
+      itemStyle:{color:COLORS.a}}]});
+}
+function renderConnBurstDur(){
+  var mb=(state.connected.monthly||{}).bursts||{};
+  var ms=connMonthKeys(mb);
+  if(!ms.length){ noData('cxBurstDur'); return; }
+  ensureCanvas('cxBurstDur');
+  setChart('cxBurstDur',{grid:baseGrid(),tooltip:Object.assign(tooltipBase(),{
+    formatter:function(ps){var d=new Date(ps[0].value[0]);
+      var s=esc(String(d.getUTCFullYear())+'-'+pad(d.getUTCMonth()+1))+'<br>';
+      ps.forEach(function(p){s+=markDot(p.color)+esc(p.seriesName)+': <b>'
+        +(p.seriesName==='Bursts'?fmtNum(p.value[1]):fmtDur(p.value[1]))+'</b><br>';});
+      return s;}}),
+    legend:legend(['Median duration','Bursts']),
+    xAxis:timeAxis(),
+    yAxis:[valAxis({axisLabel:{color:MUTED,formatter:function(v){return fmtNum(v)+'m';}}}),
+           valAxis({splitLine:{show:false}})],
+    series:[
+      {name:'Median duration',type:'line',showSymbol:false,yAxisIndex:0,
+        data:ms.map(function(m){return [parseYMD(m+'-01').getTime(),mb[m].median_min];}),
+        lineStyle:{width:2,color:COLORS.a},itemStyle:{color:COLORS.a}},
+      {name:'Bursts',type:'bar',yAxisIndex:1,barMaxWidth:12,
+        data:ms.map(function(m){return [parseYMD(m+'-01').getTime(),mb[m].count];}),
+        itemStyle:{color:'rgba(158,158,158,.45)'}}]});
+}
+function renderConnFocus(){
+  var att=state.connected.attention||{};
+  var focus=att.focus_index, frag=att.fragmentation_index;
+  if(focus==null){ noData('cxFocus'); return; }
+  ensureCanvas('cxFocus');
+  var sw=att.chat_switch||{};
+  setChart('cxFocus',{grid:{left:100,right:60,top:26,bottom:30},
+    tooltip:{backgroundColor:PANEL,borderColor:GRID,textStyle:{color:TEXT},
+      formatter:function(p){return esc(p.name)+': <b>'+fmtPct(p.value,1)+'</b>';}},
+    xAxis:valAxis({max:1,axisLabel:{color:MUTED,formatter:function(v){return fmtPct(v);}}}),
+    yAxis:{type:'category',data:['Juggling ≥2 chats','Single-chat focus'],
+      axisLabel:{color:MUTED},axisLine:{lineStyle:{color:GRID}}},
+    series:[{type:'bar',barMaxWidth:26,data:[
+      {value:frag,itemStyle:{color:'#E4A11B'}},
+      {value:focus,itemStyle:{color:COLORS.a}}],
+      label:{show:true,position:'right',color:MUTED,
+        formatter:function(p){return fmtPct(p.value,1);}}}],
+    graphic:[{type:'text',left:'center',top:2,style:{
+      text:'chat switches: '+fmtNum(sw.switches_per_active_hour)+' / active hour · '
+        +fmtPct(sw.switch_fraction,1)+' of quick follow-ups change chat',
+      fill:MUTED,fontSize:11}}]});
+}
+function renderConnTypeMix(){
+  var tm=(state.connected.monthly||{}).type_mix||{};
+  var ms=connMonthKeys(tm);
+  if(!ms.length){ noData('cxTypeMix'); return; }
+  ensureCanvas('cxTypeMix');
+  var series=CONN_TYPES.map(function(t){
+    return {name:CONN_TYPE_LBL[t],type:'bar',stack:'mix',barMaxWidth:22,
+      data:ms.map(function(m){return [parseYMD(m+'-01').getTime(),(tm[m]||{})[t]||0];}),
+      itemStyle:{color:CONN_TYPE_COLORS[t]}};
+  });
+  setChart('cxTypeMix',{grid:baseGrid(),legend:legend(CONN_TYPES.map(function(t){return CONN_TYPE_LBL[t];})),
+    tooltip:tooltipBase(),xAxis:timeAxis(),yAxis:valAxis({}),series:series});
+}
+function renderConnDeep(){
+  var dw=(state.connected.weekly||{}).deep_talk||{};
+  var ks=connWeekKeys(dw);
+  if(!ks.length){ noData('cxDeep'); return; }
+  ensureCanvas('cxDeep');
+  setChart('cxDeep',{grid:baseGrid(),tooltip:tooltipBase(),
+    xAxis:timeAxis(),yAxis:valAxis({minInterval:1}),
+    series:[{name:'Deep talks',type:'bar',barMaxWidth:10,
+      data:ks.map(function(k){return [isoWeekStartDate(k).getTime(),dw[k]];}),
+      itemStyle:{color:CONN_TYPE_COLORS.deep_talk}}]});
+}
+
+/* horizontal leaderboard bars: rows = [{name,v,tip}] descending */
+function connHBar(id,rows,fmt){
+  if(!rows||!rows.length){ noData(id); return; }
+  ensureCanvas(id);
+  var arr=rows.slice(0,12).reverse();  // ascending -> biggest on top
+  setChart(id,{grid:{left:150,right:64,top:8,bottom:24},
+    tooltip:{backgroundColor:PANEL,borderColor:GRID,textStyle:{color:TEXT},
+      formatter:function(p){var r=arr[p.dataIndex];
+        return esc(r.name)+': <b>'+fmt(r.v)+'</b>'+(r.tip?'<br>'+esc(r.tip):'');}},
+    xAxis:valAxis({}),
+    yAxis:{type:'category',data:arr.map(function(r){return r.name;}),
+      axisLabel:{color:MUTED,width:135,overflow:'truncate'},axisLine:{lineStyle:{color:GRID}}},
+    series:[{type:'bar',barMaxWidth:16,
+      data:arr.map(function(r){return {value:r.v,itemStyle:{color:r.c||COLORS.a}};}),
+      label:{show:true,position:'right',color:MUTED,
+        formatter:function(p){return fmt(p.value);}}}]});
+}
+function renderConnLeaderboards(){
+  var c=state.connected, lb=c.leaderboards||{};
+  // Where your messages go — top 12 + Others (share of all sent).
+  var bs=(lb.by_sent_share||[]).slice(0,12);
+  var covered=0; bs.forEach(function(r){covered+=r.sent;});
+  var totSent=(c.totals||{}).messages_sent||0;
+  var rows=bs.map(function(r){return {name:r.name,v:r.share,tip:fmtNum(r.sent)+' messages'};});
+  if(totSent>covered) rows.push({name:'Others',v:(totSent-covered)/totSent,
+    tip:fmtNum(totSent-covered)+' messages',c:OTHERS_COLOR});
+  rows.sort(function(a,b){return b.v-a.v;});
+  connHBar('cxSentL',rows,function(v){return fmtPct(v,1);});
+  // Attention hierarchy — fastest first (ascending latency).
+  var ah=(lb.attention_hierarchy||[]).slice(0,12).map(function(r){
+    return {name:r.name,v:r.reply_latency_median_min,tip:fmtNum(r.reply_n)+' replies (≥50 gate)'};});
+  ah.reverse(); // connHBar re-reverses: fastest ends up on top
+  connHBar('cxLatL',ah,function(v){return fmtDur(v);});
+  // Initiation asymmetry.
+  connHBar('cxInitL',(lb.initiation||[]).slice(0,12).map(function(r){
+    return {name:r.name,v:r.initiation_share,tip:fmtNum(r.sessions)+' sessions'};}),
+    function(v){return fmtPct(v);});
+  // Night ownership.
+  connHBar('cxNightL',(lb.night||[]).slice(0,12).map(function(r){
+    return {name:r.name,v:r.night_share,tip:fmtNum(r.night_msgs)+' night messages'};}),
+    function(v){return fmtPct(v,1);});
+  // Openness (words per turn).
+  connHBar('cxOpenL',(lb.openness||[]).slice(0,12).map(function(r){
+    return {name:r.name,v:r.words_per_turn,
+      tip:'questions '+fmtPct(r.question_rate,1)+' · I-words '+fmtPct(r.i_word_rate,1)
+        +' · positivity '+fmtPct(r.pos_rate,1)};}),
+    function(v){return fmtNum(v);});
+  // Style mirroring box.
+  var cs=c.code_switching||{}, pc=(cs.per_contact||[]).slice();
+  pc.sort(function(a,b){return (b.mirror_score||0)-(a.mirror_score||0);});
+  var h='<div class="nlp-label">You mirror most</div>';
+  pc.slice(0,6).forEach(function(r){
+    h+='<span class="tag hot">'+esc(r.name)+'<span class="n">'+fmtPct(r.mirror_score,0)+'</span></span>';});
+  h+='<div class="nlp-label">Style variance across contacts</div>'
+    +'<div class="vocab-line">emoji rate '+fmtNum(cs.emoji_rate_variance)
+    +' · word length '+fmtNum(cs.avg_word_len_variance)
+    +' · language mix '+fmtNum(cs.lang_variance)+'</div>'
+    +'<div class="vocab-line faint">Higher variance = you change voice more between people (code-switching).</div>';
+  var box=el('connMirrorBox'); if(box) box.innerHTML=h;
+}
+
+function renderConnGini(){
+  var g=(state.connected.monthly||{}).gini||{};
+  var ms=connMonthKeys(g);
+  if(!ms.length){ noData('cxGini'); return; }
+  ensureCanvas('cxGini');
+  setChart('cxGini',{grid:baseGrid(),tooltip:tooltipBase(),
+    xAxis:timeAxis(),yAxis:valAxis({min:0,max:1}),
+    series:[{name:'Gini',type:'line',showSymbol:false,
+      data:ms.map(function(m){return [parseYMD(m+'-01').getTime(),g[m]];}),
+      lineStyle:{width:2,color:COLORS.a},itemStyle:{color:COLORS.a},
+      areaStyle:{color:COLORS.a,opacity:.15}}]});
+}
+function renderConnDyn(){
+  var mo=state.connected.monthly||{};
+  var ac=mo.active_contacts||{}, ch=mo.churned||{}, re=mo.reactivated||{};
+  var ms=connMonthKeys(ac);
+  if(!ms.length){ noData('cxDyn'); return; }
+  ensureCanvas('cxDyn');
+  function ser(name,src,color){
+    return {name:name,type:'line',showSymbol:false,
+      data:ms.map(function(m){return [parseYMD(m+'-01').getTime(),src[m]||0];}),
+      lineStyle:{width:1.5,color:color},itemStyle:{color:color}};
+  }
+  setChart('cxDyn',{grid:baseGrid(),legend:legend(['Active','Churned','Reactivated']),
+    tooltip:tooltipBase(),xAxis:timeAxis(),yAxis:valAxis({minInterval:1}),
+    series:[ser('Active',ac,COLORS.a),ser('Churned',ch,'#E02F44'),
+            ser('Reactivated',re,'#73BF69')]});
+}
+function renderConnRecip(){
+  var c=state.connected, r=c.reciprocity||{}, lb=c.leaderboards||{};
+  var h='<div class="vocab-line">Overall: you sent <b>'+fmtNum(r.sent_total)
+    +'</b> · received <b>'+fmtNum(r.received_total)+'</b> · ratio <b>'
+    +(r.ratio==null?'—':fmtNum(r.ratio))+'</b></div>';
+  function rows(list,label){
+    var s='<div class="nlp-label">'+esc(label)+'</div>';
+    (list||[]).slice(0,5).forEach(function(x){
+      s+='<div class="vocab-line">'+esc(x.name)+' — ratio '+fmtNum(x.reciprocity)
+        +' <span class="faint">(sent '+fmtNum(x.sent)+' / recv '+fmtNum(x.received)+')</span></div>';});
+    return s;
+  }
+  h+=rows(lb.reciprocity_surplus,'You over-invest (send ≫ receive)');
+  h+=rows(lb.reciprocity_deficit,'You under-invest (receive ≫ send)');
+  var box=el('connRecipBox'); if(box) box.innerHTML=h;
+}
+
+function renderConnFunnel(){
+  var f=state.connected.funnel||{}, st=f.stages||{}, rt=f.retention||{};
+  if(!st.met){ noData('cxFunnel'); return; }
+  ensureCanvas('cxFunnel');
+  var cats=['Met','Talked again','Recurring (3+ sessions)','Still active 30d+','Still active 90d+'];
+  var vals=[st.met,st.talked_again,st.recurring,rt.active_30d,rt.active_90d];
+  setChart('cxFunnel',{grid:{left:170,right:60,top:8,bottom:24},
+    tooltip:{backgroundColor:PANEL,borderColor:GRID,textStyle:{color:TEXT},
+      formatter:function(p){return esc(p.name)+': <b>'+fmtNum(p.value)+'</b>'
+        +(st.met?' ('+fmtPct(p.value/st.met,0)+' of met)':'');}},
+    xAxis:valAxis({}),
+    yAxis:{type:'category',data:cats.slice().reverse(),
+      axisLabel:{color:MUTED,width:160,overflow:'truncate'},axisLine:{lineStyle:{color:GRID}}},
+    series:[{type:'bar',barMaxWidth:20,
+      data:vals.slice().reverse().map(function(v,i){
+        return {value:v,itemStyle:{color:COLORS.a,opacity:.45+.55*(v/(st.met||1))}};}),
+      label:{show:true,position:'right',color:MUTED,
+        formatter:function(p){return fmtNum(p.value);}}}]});
+}
+function renderConnNewContacts(){
+  var np=(state.connected.funnel||{}).new_per_month||{};
+  var ms=connMonthKeys(np);
+  if(!ms.length){ noData('cxNewC'); return; }
+  ensureCanvas('cxNewC');
+  setChart('cxNewC',{grid:baseGrid(),legend:legend(['You texted first','They texted first']),
+    tooltip:tooltipBase(),xAxis:timeAxis(),yAxis:valAxis({minInterval:1}),
+    series:[
+      {name:'You texted first',type:'bar',stack:'n',barMaxWidth:18,
+        data:ms.map(function(m){return [parseYMD(m+'-01').getTime(),np[m].owner_first||0];}),
+        itemStyle:{color:COLORS.a}},
+      {name:'They texted first',type:'bar',stack:'n',barMaxWidth:18,
+        data:ms.map(function(m){return [parseYMD(m+'-01').getTime(),np[m].contact_first||0];}),
+        itemStyle:{color:'#9E9E9E'}}]});
+}
+function renderConnGroups(){
+  var g=state.connected.groups||{}, box=el('connGroupsBox');
+  if(!box) return;
+  if(!g.count){ box.innerHTML='<div class="placeholder" style="height:60px">No group chats</div>'; return; }
+  var h='<div class="vocab-line">'+fmtNum(g.count)+' groups · you sent <b>'+fmtNum(g.messages_owner)
+    +'</b> of '+fmtNum(g.messages_total)+' messages · '+fmtDur(g.texting_minutes)+' of group texting</div>'
+    +'<table class="lt-table"><tr><th>Group</th><th>Members</th><th>Your msgs</th><th>Total</th><th>Time</th></tr>';
+  (g.per_group||[]).slice(0,10).forEach(function(x){
+    h+='<tr><td>'+esc(x.name)+'</td><td class="num">'+fmtNum(x.members)
+      +'</td><td class="num">'+fmtNum(x.messages_owner)+'</td><td class="num">'+fmtNum(x.messages_total)
+      +'</td><td class="num">'+fmtDur(x.texting_minutes)+'</td></tr>';});
+  h+='</table>';
+  box.innerHTML=h;
+}
 
 /* ============================================================ *
  * CONTROLS
@@ -1766,22 +2250,74 @@ function applyCustomRange(){
   state.preset=null; syncControls(); rerender();
 }
 
+/* ---------- platform filter ---------- */
+/* selectedPlatforms: null/empty Set => ALL. Otherwise only listed platforms. */
+var selectedPlatforms = null;
+function pfOf(m){ return m.platform||'instagram'; }
+function pfBadge(p){ return p==='telegram'?'✈️':'📸'; }
+function pfLabel(p){ return p==='telegram'?'✈️ Telegram':(p==='instagram'?'📸 Instagram':p); }
+function platformVisible(m){
+  return !(selectedPlatforms&&selectedPlatforms.size)||selectedPlatforms.has(pfOf(m));
+}
+function visibleManifest(){ return MANIFEST.filter(platformVisible); }
+function buildPlatformFilter(){
+  var present={}; MANIFEST.forEach(function(m){present[pfOf(m)]=1;});
+  var plats=Object.keys(present).sort();
+  var ctrl=el('platformControl'), seg=el('platformSeg');
+  if(!ctrl||!seg) return;
+  if(plats.length<2){ ctrl.style.display='none'; return; }
+  ctrl.style.display='';
+  seg.innerHTML='';
+  plats.forEach(function(p){
+    var chip=document.createElement('span');
+    var on=!(selectedPlatforms&&selectedPlatforms.size)||selectedPlatforms.has(p);
+    chip.className='chip'+(on?' active':'');
+    chip.textContent=pfLabel(p);
+    chip.onclick=function(){ togglePlatform(p); };
+    seg.appendChild(chip);
+  });
+}
+function togglePlatform(p){
+  if(!selectedPlatforms) selectedPlatforms=new Set();
+  if(selectedPlatforms.has(p)) selectedPlatforms.delete(p);
+  else selectedPlatforms.add(p);
+  // Empty selection => back to ALL.
+  if(selectedPlatforms.size===0) selectedPlatforms=null;
+  buildPlatformFilter();
+  buildChatDropdown(el('chatSearch')?el('chatSearch').value:'');
+  // If the current chat is now filtered out, jump to the first visible one.
+  // (The pinned connected view is platform-independent — never kicked out.)
+  var vis=visibleManifest();
+  if(vis.length && !state.isConnected && !vis.some(function(m){return m.id===state.chatId;})){
+    selectChat(vis[0].id);
+  }
+}
+
 /* ---------- chat selector ---------- */
 function buildChatDropdown(filter){
   var list=el('chatList'); list.innerHTML='';
   var q=(filter||'').toLowerCase();
-  MANIFEST.forEach(function(m){
+  // Pinned owner entry — always on top, immune to platform filter and search.
+  var you=document.createElement('div');
+  you.className='dd-item connected'+(state.isConnected?' active':'');
+  var yn=document.createElement('span'); yn.textContent='👤 You — Connected';
+  var yd=document.createElement('span'); yd.className='n'; yd.textContent='all chats';
+  you.appendChild(yn); you.appendChild(yd);
+  you.onclick=function(){ selectConnected(); closeDD(); };
+  list.appendChild(you);
+  visibleManifest().forEach(function(m){
     if(q && m.name.toLowerCase().indexOf(q)<0) return;
     var item=document.createElement('div');
     item.className='dd-item'+(m.id===state.chatId?' active':'');
-    var name=document.createElement('span'); name.textContent=m.name;
+    var name=document.createElement('span');
+    name.textContent=pfBadge(pfOf(m))+' '+m.name;
     var n=document.createElement('span'); n.className='n';
     n.textContent=(m.is_group?('👥 '+(m.members||'')+' · '):'')+fmtNum(m.messages)+' msgs';
     item.appendChild(name); item.appendChild(n);
     item.onclick=function(){ selectChat(m.id); closeDD(); };
     list.appendChild(item);
   });
-  if(!list.children.length){ var e=document.createElement('div');
+  if(list.children.length<=1){ var e=document.createElement('div');
     e.className='dd-item faint'; e.textContent='No matches'; list.appendChild(e); }
 }
 function openDD(){ el('chatPanel').classList.add('open'); el('chatSearch').focus(); }
@@ -1798,10 +2334,50 @@ function selectChat(id){
   s.onerror=function(){ el('app').innerHTML='<div class="placeholder" style="height:200px">Failed to load chat data.</div>'; };
   document.body.appendChild(s);
 }
+/* ---------- connected (owner) mode entry ---------- */
+var CONNECTED_ID='__connected';
+function selectConnected(){
+  txt(el('chatBtnLabel'),'👤 You — Connected');
+  state.chatId=CONNECTED_ID;
+  if(window.CONNECTED){ onConnectedLoaded(); return; }
+  var s=document.createElement('script');
+  s.src='data/connected.js';
+  s.onload=function(){ onConnectedLoaded(); };
+  s.onerror=function(){ connectedMissing(); };
+  document.body.appendChild(s);
+}
+function connectedMissing(){
+  disposeCharts();
+  state.isConnected=false; state.connected=null; state.chat=null;
+  el('app').innerHTML='<div class="card" style="margin-top:26px;text-align:center;padding:40px 20px">'
+    +'<h3 style="margin-bottom:8px">👤 You — Connected is not built yet</h3>'
+    +'<div class="sub" style="font-size:13px">This view merges every Instagram chat into one owner profile.<br>'
+    +'Generate it once with:<br><br>'
+    +'<code style="background:var(--panel-2);border:1px solid var(--border);border-radius:6px;padding:6px 12px;display:inline-block">python build_connected.py</code>'
+    +'<br><br>…then rebuild or just reload this page.</div></div>';
+}
+function onConnectedLoaded(){
+  var c=window.CONNECTED;
+  if(!c||!c.daily){ connectedMissing(); return; }
+  disposeCharts();
+  state.connected=c; state.isConnected=true;
+  state.chat=null; state.isGroup=false; state.users=[c.owner||'You',null];
+  var dates=Object.keys(c.daily).sort();
+  if(dates.length){ state.fullStart=parseYMD(dates[0]); state.fullEnd=parseYMD(dates[dates.length-1]); }
+  else { var t=new Date(); state.fullStart=t; state.fullEnd=t; }
+  state.start=new Date(state.fullStart.getTime()); state.end=new Date(state.fullEnd.getTime());
+  state.preset='all';
+  renderSkeletonConnected();
+  buildPresets(); buildMonthPicker(); syncControls();
+  if(!dates.length){ el('kpiRow').innerHTML='<div class="kpi"><div class="placeholder">No data</div></div>'; return; }
+  renderAllConnected();
+}
+
 function onChatLoaded(id){
   var chat=DATA[id];
   if(!chat){ return; }
   disposeCharts();
+  state.isConnected=false; state.connected=null;
   state.chat=chat;
   state.isGroup=!!chat.is_group;
   state.users=(chat.participants&&chat.participants.length>=2)?
@@ -1830,10 +2406,11 @@ function init(){
   el('chatSearch').oninput=function(){ buildChatDropdown(this.value); };
   document.addEventListener('click',function(e){
     if(!el('chatDD').contains(e.target)) closeDD(); });
-  el('gran').onchange=function(){ state.gran=this.value; if(state.chat) rerender(); };
-  el('monthSel').onchange=function(){ if(state.chat) applyMonth(this.value); };
+  el('gran').onchange=function(){ state.gran=this.value; if(state.chat||state.isConnected) rerender(); };
+  el('monthSel').onchange=function(){ if(state.chat||state.isConnected) applyMonth(this.value); };
   el('applyRange').onclick=applyCustomRange;
   el('dFrom').onchange=function(){}; el('dTo').onchange=function(){};
+  buildPlatformFilter();
   buildChatDropdown('');
   selectChat(MANIFEST[0].id);
 }

@@ -1,8 +1,9 @@
-# Instagram Chat Analyzer
+# Chat Analyzer (Instagram + Telegram)
 
-Turn your own Instagram chats into clear charts and an interactive dashboard.
+Turn your own Instagram and Telegram chats into clear charts and an
+interactive dashboard.
 
-This tool looks at the messages in your Instagram conversations and shows you
+This tool looks at the messages in your conversations and shows you
 things like who texts more, how fast each person replies, when you talk during
 the day, how the tone changes over months, which words each person uses, and
 much more.
@@ -18,7 +19,7 @@ folder on your machine.
 
 - A computer running Windows, macOS, or Linux.
 - About 20 minutes (plus waiting time for Instagram to prepare your data).
-- Your own Instagram data download (steps below).
+- Your own Instagram and/or Telegram data download (steps below).
 
 ---
 
@@ -50,6 +51,24 @@ built-in feature. Do it from the Instagram app or from instagram.com.
     (for example, your Downloads folder).
 
 You now have a file with a name like `instagram-yourname-2026-...zip`.
+
+### Telegram instead (or as well)?
+
+Telegram exports come from the **desktop app** (Telegram Desktop on Windows,
+macOS, or Linux — the phone app cannot export). For each conversation you want
+to analyze:
+
+1. Open **Telegram Desktop** and open the conversation.
+2. Click the **⋮** (three dots) menu in the top-right → **Export chat history**.
+3. Untick photos, videos, and files — only the messages are needed.
+4. Set **Format** to **JSON** (click the "Format" line — it defaults to HTML,
+   which the tool cannot read).
+5. Set the date range to all time, then click **Export**.
+6. You get a folder (usually called `ChatExport_<date>`) containing a
+   `result.json` file. Zip that folder, or just remember where it is.
+
+You can analyze Instagram only, Telegram only, or both together — the
+dashboard shows all your chats side by side with a platform filter.
 
 ---
 
@@ -118,16 +137,21 @@ just run the `activate` line again before using the tool.
 
 ### 3a. Import your download
 
-Point the tool at the ZIP file you got from Instagram:
+Point the tool at the ZIP file you got from Instagram or Telegram:
 
 ```
 python main.py --import-zip path/to/your-download.zip
 ```
 
 Replace `path/to/your-download.zip` with the real location of your file (for
-example on Windows `C:\Users\You\Downloads\instagram-yourname-2026.zip`). This
-copies your chats into the project's `Chats/` folder and tells you how many
-conversations it found.
+example on Windows `C:\Users\You\Downloads\instagram-yourname-2026.zip`). The
+tool recognizes which platform the ZIP came from on its own and files it into
+`Chats/Instagram/` or `Chats/Telegram/` accordingly, then tells you how many
+conversations it found. Run the command once per ZIP if you have several.
+
+(You can also skip the ZIP and copy a Telegram `ChatExport_...` folder — the
+one containing `result.json` — straight into `Chats/Telegram/` yourself. Both
+ways work.)
 
 ### 3b. Analyze everything
 
@@ -161,6 +185,17 @@ python build_dashboard.py
 Then open the file **`Dashboard/index.html`** by double-clicking it. It opens
 in your normal web browser as a private local page.
 
+### 3d. Build your personal profile (optional)
+
+```
+python build_connected.py
+```
+
+This adds a special **👤 You — Connected** entry at the top of the dashboard's
+chat list. Instead of looking at one conversation, it merges *all* your
+Instagram chats into a single portrait of you as a texter (see "What you get"
+below). Re-run it whenever you re-run the analysis.
+
 ### Analyzing only some chats
 
 You can focus on one or a few conversations by name:
@@ -185,7 +220,9 @@ balance, busiest days, reply times, language mix, top words, and more), plus
 the raw numbers as data files if you ever want them.
 
 **In `Dashboard/index.html`** — one interactive page tying it all together. You
-pick a chat, drag a time slider, and every panel updates. It includes:
+pick a chat (Instagram and Telegram chats live in the same list — use the
+platform filter next to the chat picker to show only one platform), drag a
+time slider, and every panel updates. It includes:
 
 - **Pulse** — the headline numbers: total messages, who sends more, typical
   reply times, active days.
@@ -201,6 +238,17 @@ pick a chat, drag a time slider, and every panel updates. It includes:
   distinctive vocabulary, and how varied their language is.
 - **Shifts** — a before-and-after comparison of two time periods so you can see
   what changed between them.
+- **Telegram signals** (Telegram chats only) — extras that only Telegram data
+  contains: how often each person edits their messages after sending, how much
+  of the talk happens in explicit replies and how deep those reply chains go,
+  who forwards content, and who sends the links, hashtags, and mentions.
+- **👤 You — Connected** (after running `build_connected.py`) — your personal
+  profile across *all* chats at once: how long you stay engaged when you start
+  texting (your "texting span"), how often you juggle several conversations at
+  the same time, what mix of quick pings versus deep talks your weeks contain,
+  whom you answer fastest, who gets your late-night messages, how concentrated
+  your attention is across people, and how many new people you met each month
+  and kept talking to.
 
 None of this is a judgement or a diagnosis — it's just a friendly, detailed
 mirror of the patterns in your own conversations.
@@ -222,9 +270,14 @@ mirror of the patterns in your own conversations.
 ## Frequently asked questions
 
 **I downloaded my data but the files end in `.html`, not `.json`.**
-Instagram gave you the wrong format. Go back to Download your information and
-request it again, and this time choose **format: JSON**. The tool can only read
-JSON exports.
+You got the wrong format. For Instagram, go back to Download your information
+and request it again with **format: JSON**. For Telegram, export again from
+Telegram Desktop and click the **Format** line to switch it from HTML to
+**JSON**. The tool can only read JSON exports.
+
+**My Instagram name and my Telegram name are different — is that a problem?**
+No. The tool detects who you are separately for each platform, so "David" on
+Instagram and "Davidus" on Telegram both get recognized as you automatically.
 
 **The Georgian text or emojis look broken/garbled in the raw export.**
 That's normal — Instagram stores them in a mangled way in the export file. The

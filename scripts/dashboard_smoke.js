@@ -110,10 +110,10 @@ vm.runInContext(fs.readFileSync(path.join(DASH, 'data/manifest.js'), 'utf8'), ct
 
 const inlineScripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
 for (const m of inlineScripts) vm.runInContext(m[1], ctx, { filename: 'inline.js' });
-for (let i = 0; i < 50 && queue.length; i++) queue.shift()();
+for (let i = 0; i < 2000 && queue.length; i++) queue.shift()();
 
 const g = (expr) => vm.runInContext(expr, ctx);
-const flush = () => { for (let i = 0; i < 50 && queue.length; i++) queue.shift()(); };
+const flush = () => { for (let i = 0; i < 2000 && queue.length; i++) queue.shift()(); };
 console.log('scripts lazy-loaded:', scriptsLoaded);
 
 // isolate per-chart failures (cCal is a known stub limitation)
@@ -142,6 +142,39 @@ try {
   } else {
     console.log('no group chats in manifest — group mode not exercised');
   }
+
+  // Telegram chat (first telegram entry in manifest, if any)
+  const tid = g("(DASHBOARD_MANIFEST.filter(function(m){return (m.platform||'instagram')==='telegram';})[0]||{}).id");
+  if (tid) {
+    g(`selectChat(${JSON.stringify(tid)})`); flush();
+    console.log('telegram', tid, '| platform:', g(`(DASHBOARD_MANIFEST.filter(function(m){return m.id===${JSON.stringify(tid)};})[0]||{}).platform`),
+      '| hasTgSignals:', g('!!(state.chat&&state.chat.telegram)'), '| charts:', g('window.__charts'), '| setOptions:', g('window.__setOptions'));
+    g("applyPreset('all')");
+    console.log('telegram preset OK | setOptions:', g('window.__setOptions'));
+
+    // Platform filter: restrict to telegram only, then back to all.
+    g("buildPlatformFilter()");
+    g("togglePlatform('telegram')");
+    const visTg = g("visibleManifest().every(function(m){return (m.platform||'instagram')==='telegram';})");
+    const visN = g("visibleManifest().length");
+    console.log('platform filter -> telegram only | allTelegram:', visTg, '| visibleCount:', visN);
+    g("togglePlatform('telegram')"); // back to ALL
+    console.log('platform filter reset | visibleCount:', g("visibleManifest().length"), '/ total:', g("DASHBOARD_MANIFEST.length"));
+  } else {
+    console.log('no telegram chats in manifest — telegram mode / platform filter not exercised');
+  }
+
+  // Connected (owner) mode — pinned "You — Connected" entry.
+  g('selectConnected()'); flush();
+  console.log('connected | isConnected:', g('state.isConnected'),
+    '| owner set:', g('!!(state.connected&&state.connected.owner)'),
+    '| daily days:', g('state.connected?Object.keys(state.connected.daily).length:0'),
+    '| charts:', g('window.__charts'), '| setOptions:', g('window.__setOptions'));
+  g("applyPreset('90')");
+  console.log('connected preset OK | setOptions:', g('window.__setOptions'));
+  // Back to a normal chat: connected state must fully unwind.
+  g(`selectChat(${JSON.stringify(first)})`); flush();
+  console.log('back from connected | isConnected:', g('state.isConnected'), '| isGroup:', g('state.isGroup'));
 } catch (e) {
   failed = true;
   console.log('SMOKE FAILED:', e.message, '\n', (e.stack || '').split('\n').slice(0, 3).join('\n'));

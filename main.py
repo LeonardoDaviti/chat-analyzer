@@ -32,6 +32,12 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.data_loader import load_chat_from_dir, get_chat_name_from_dir, load_chats_from_dirs
+from src.loaders.telegram import (
+    load_telegram_chat,
+    telegram_participants,
+    telegram_thread_path,
+    telegram_title,
+)
 from src.normalizer import decode_georgian_text
 from src.session_chunker import chunk_messages, get_session_statistics
 from src.session_markdown import export_sessions_to_markdown
@@ -45,33 +51,49 @@ from src.output_manager import create_output_dir, save_json
 _INBOX_SUFFIX = ("your_instagram_activity", "messages", "inbox")
 
 
+def detect_platform(chat_dir: str) -> str:
+    """Detect a chat's platform by *content*, not by folder name.
+
+    A ``result.json`` in the folder → Telegram; otherwise (Instagram export
+    layout with ``message_*.json`` / ``combined_message.json`` / a
+    ``normalized.json``) → Instagram. The ``Chats/Instagram|Telegram/`` folders
+    are organization only; detection never relies on them.
+    """
+    if (Path(chat_dir) / "result.json").exists():
+        return "telegram"
+    return "instagram"
+
+
 def _find_inboxes(base_dir: Path) -> list[tuple[str, Path]]:
-    """Locate every Instagram-export inbox under ``Chats/``.
+    """Locate every Instagram-export inbox anywhere under ``Chats/``.
 
-    Supports two layouts:
-      * ``Chats/<export-folder>/your_instagram_activity/messages/inbox``
-        (one or more export folders side by side), and
-      * ``Chats/your_instagram_activity/messages/inbox`` (the user extracted
-        the zip directly into ``Chats/``).
+    Recursively finds ``.../your_instagram_activity/messages/inbox`` so all of
+    these layouts work:
+      * ``Chats/Instagram/<export>/your_instagram_activity/messages/inbox``
+        (new platform-separated layout),
+      * ``Chats/<export>/your_instagram_activity/messages/inbox`` (legacy flat),
+      * ``Chats/your_instagram_activity/messages/inbox`` (zip extracted directly).
 
-    Returns a list of ``(export_label, inbox_path)`` tuples.
+    Returns a list of ``(export_label, inbox_path)`` tuples where the label is
+    the export folder that owns the inbox.
     """
     chats_root = base_dir / "Chats"
     found: list[tuple[str, Path]] = []
+    if not chats_root.exists():
+        return found
 
-    # Layout B: zip extracted straight into Chats/.
-    direct = chats_root.joinpath(*_INBOX_SUFFIX)
-    if direct.exists():
-        found.append(("Chats", direct))
-
-    # Layout A: one or more export folders under Chats/.
-    if chats_root.exists():
-        for sub in sorted(chats_root.iterdir()):
-            if not sub.is_dir():
-                continue
-            inbox = sub.joinpath(*_INBOX_SUFFIX)
-            if inbox.exists():
-                found.append((sub.name, inbox))
+    pattern = "/".join(("**",) + _INBOX_SUFFIX)
+    seen: set[Path] = set()
+    # Also handle the inbox sitting directly at Chats/ root (no '**' match).
+    candidates = [chats_root.joinpath(*_INBOX_SUFFIX)] + sorted(chats_root.glob(pattern))
+    for inbox in candidates:
+        if not inbox.exists() or not inbox.is_dir() or inbox in seen:
+            continue
+        seen.add(inbox)
+        # The export folder is the ancestor just above ``your_instagram_activity``.
+        export_dir = inbox.parents[len(_INBOX_SUFFIX) - 1]
+        label = export_dir.name if export_dir != chats_root else "Chats"
+        found.append((label, inbox))
 
     return found
 
@@ -79,19 +101,23 @@ def _find_inboxes(base_dir: Path) -> list[tuple[str, Path]]:
 def discover_all_chats(base_dir: str) -> list[tuple[str, str]]:
     """Auto-discover all chat directories across every export under ``Chats/``.
 
-    Returns a list of ``(export_label, chat_dir)`` tuples so callers can report
-    which export each chat came from. Multiple exports are concatenated.
+    Detects platform per chat folder by content: folders with ``result.json``
+    are Telegram chats; folders inside an Instagram inbox are Instagram chats.
+    Returns a list of ``(export_label, chat_dir)`` tuples.
     """
-    inboxes = _find_inboxes(Path(base_dir))
-    if not inboxes:
-        raise FileNotFoundError(
-            f"No Instagram export inbox found under {Path(base_dir) / 'Chats'}. "
-            f"Expected .../your_instagram_activity/messages/inbox — "
-            f"import a download first with:  python main.py --import-zip <zip>"
-        )
-
+    chats_root = Path(base_dir) / "Chats"
     chats: list[tuple[str, str]] = []
-    for export_label, inbox in inboxes:
+
+    # --- Telegram: any folder that contains a result.json --------------------- #
+    if chats_root.exists():
+        for result_file in sorted(chats_root.glob("**/result.json")):
+            chat_dir = result_file.parent
+            parent = chat_dir.parent
+            label = parent.name if parent != chats_root else "Telegram"
+            chats.append((label, str(chat_dir)))
+
+    # --- Instagram: chat folders inside every discovered inbox ---------------- #
+    for export_label, inbox in _find_inboxes(chats_root.parent):
         for chat_dir in sorted(inbox.iterdir()):
             if not chat_dir.is_dir():
                 continue
@@ -104,11 +130,23 @@ def discover_all_chats(base_dir: str) -> list[tuple[str, str]]:
             if has_msgs:
                 chats.append((export_label, str(chat_dir)))
 
+    if not chats:
+        raise FileNotFoundError(
+            f"No Instagram or Telegram chats found under {chats_root}. "
+            f"Instagram: .../your_instagram_activity/messages/inbox; "
+            f"Telegram: a folder containing result.json. "
+            f"Import a download first with:  python main.py --import-zip <zip>"
+        )
+
     return chats
 
 
 def _chat_participants(chat_dir: str) -> list[str]:
     """Decoded participant display names for a chat (cheap, no full pipeline)."""
+    if detect_platform(chat_dir) == "telegram":
+        # Telegram sender names are already clean UTF-8 (no mojibake repair).
+        return telegram_participants(chat_dir)
+
     p = Path(chat_dir)
     candidates = [p / "combined_message.json", p / "normalized.json"]
     candidates += sorted(p.glob("message_*.json"))
@@ -137,6 +175,9 @@ def _chat_thread_path(chat_dir: str) -> str:
     Reads whichever metadata file is available (combined/normalized/message_*);
     ``thread_path`` is present in all of them (report §2).
     """
+    if detect_platform(chat_dir) == "telegram":
+        return telegram_thread_path(chat_dir)
+
     p = Path(chat_dir)
     candidates = [p / "combined_message.json", p / "normalized.json"]
     candidates += sorted(p.glob("message_*.json"))
@@ -229,11 +270,31 @@ def detect_owner(chat_dirs: list[str]) -> Optional[str]:
     )
 
 
-def import_zip(zip_path: str, base_dir: Path) -> str:
-    """Extract an Instagram export zip into ``Chats/<zipname>/`` (zip-slip safe).
+def _zip_platform(namelist: list[str]) -> str:
+    """Detect whether a zip's member list is a Telegram or Instagram export.
 
-    Validates that ``your_instagram_activity/messages/inbox`` exists inside the
-    extracted data and prints how many chats were found. Returns the target dir.
+    Telegram Desktop exports (ChatExport_*.zip / DataExport_*.zip) contain a
+    ``result.json``; Instagram 'messages' exports contain the
+    ``your_instagram_activity/messages/inbox`` tree.
+    """
+    inbox_suffix = "/".join(_INBOX_SUFFIX)
+    for name in namelist:
+        norm = name.replace("\\", "/")
+        if norm.rstrip("/").endswith("result.json"):
+            return "telegram"
+    for name in namelist:
+        if name.replace("\\", "/").find(inbox_suffix) >= 0:
+            return "instagram"
+    return "unknown"
+
+
+def import_zip(zip_path: str, base_dir: Path) -> str:
+    """Extract an Instagram or Telegram export zip into the right platform
+    subfolder (zip-slip safe).
+
+    Detects the platform from the archive contents and extracts into
+    ``Chats/Instagram/<zipname>/`` or ``Chats/Telegram/<zipname>/``. Returns the
+    target dir.
     """
     zp = Path(zip_path).expanduser()
     if not zp.exists():
@@ -241,12 +302,22 @@ def import_zip(zip_path: str, base_dir: Path) -> str:
     if not zipfile.is_zipfile(zp):
         raise ValueError(f"Not a valid zip file: {zp}")
 
-    target = (base_dir / "Chats" / zp.stem)
-    target.mkdir(parents=True, exist_ok=True)
-    target_root = target.resolve()
-
     with zipfile.ZipFile(zp) as zf:
-        for member in zf.namelist():
+        names = zf.namelist()
+        platform = _zip_platform(names)
+        if platform == "unknown":
+            raise FileNotFoundError(
+                "Zip is neither an Instagram 'messages' export "
+                "(your_instagram_activity/messages/inbox) nor a Telegram export "
+                "(result.json). Export Instagram messages or Telegram data as JSON."
+            )
+
+        subdir = "Telegram" if platform == "telegram" else "Instagram"
+        target = (base_dir / "Chats" / subdir / zp.stem)
+        target.mkdir(parents=True, exist_ok=True)
+        target_root = target.resolve()
+
+        for member in names:
             # Reject any member that would escape the target directory
             # (zip-slip / path traversal).
             dest = (target / member).resolve()
@@ -254,9 +325,20 @@ def import_zip(zip_path: str, base_dir: Path) -> str:
                 raise ValueError(f"Unsafe path in zip (zip-slip blocked): {member}")
         zf.extractall(target)
 
-    print(f"📦 Extracted '{zp.name}' → {target}")
+    print(f"📦 Extracted '{zp.name}' ({platform}) → {target}")
 
-    # The inbox may be at the archive root or under a single wrapping folder.
+    if platform == "telegram":
+        results = [target / "result.json"] if (target / "result.json").exists() \
+            else sorted(target.glob(os.path.join("**", "result.json")))
+        if not results:
+            raise FileNotFoundError(
+                "Extracted Telegram archive does not contain result.json."
+            )
+        print(f"✅ Import OK — Telegram export with {len(results)} result.json")
+        print("   Next: run  python main.py")
+        return str(target)
+
+    # Instagram: the inbox may be at the archive root or under a wrapping folder.
     inbox = target.joinpath(*_INBOX_SUFFIX)
     if not inbox.exists():
         matches = sorted(target.glob(os.path.join("**", *_INBOX_SUFFIX)))
@@ -286,7 +368,8 @@ def run_chat_pipeline(
     session_gap_hours: float = 2.0,
     min_session_messages: int = 3,
     min_session_duration_s: int = 30,
-    skip_visualizations: bool = False
+    skip_visualizations: bool = False,
+    platform: Optional[str] = None,
 ) -> dict:
     """Run the full analysis pipeline for a single chat.
     
@@ -308,9 +391,17 @@ def run_chat_pipeline(
     print(f"📁 Loading chat: {chat_dir.split('/')[-1]}")
     print(f"{'='*60}")
     
-    data = load_chat_from_dir(chat_dir)
-    chat_name = get_chat_name_from_dir(chat_dir)
+    if platform is None:
+        platform = detect_platform(chat_dir)
 
+    if platform == "telegram":
+        data = load_telegram_chat(chat_dir)
+        chat_name = data.get("title") or telegram_title(chat_dir)
+    else:
+        data = load_chat_from_dir(chat_dir)
+        chat_name = get_chat_name_from_dir(chat_dir)
+
+    print(f"   Platform: {platform}")
     print(f"   Chat name: {chat_name}")
     print(f"   Total messages: {len(data.get('messages', []))}")
     
@@ -585,17 +676,32 @@ def main():
             print(f"\n❌ All chats were excluded by: {args.exclude}")
             sys.exit(1)
 
-    # Resolve account owner name: explicit override or auto-detect over ALL
-    # discovered chats (so filtering to one chat still detects correctly).
-    my_name = args.my_name
-    if my_name:
-        print(f"\n👤 Account owner: {my_name} (from --my-name)")
+    # Resolve account owner name: explicit override, or auto-detect PER PLATFORM
+    # over ALL discovered chats of that platform. The owner's display name can
+    # differ between platforms (e.g. Instagram 'David' vs Telegram 'Davidus'),
+    # so a single global owner would leave one side of every cross-platform chat
+    # empty. Detection is over all discovered (not just selected) chats so
+    # filtering to one chat still detects correctly.
+    owner_by_platform: dict[str, Optional[str]] = {}
+    if args.my_name:
+        print(f"\n👤 Account owner: {args.my_name} (from --my-name, all platforms)")
+
+        def owner_for(chat_dir: str) -> Optional[str]:
+            return args.my_name
     else:
-        my_name = detect_owner([d for _, d in discovered])
-        if not my_name:
+        for plat in ('instagram', 'telegram'):
+            dirs = [d for _, d in discovered if detect_platform(d) == plat]
+            if dirs:
+                owner_by_platform[plat] = detect_owner(dirs)
+        if not any(owner_by_platform.values()):
             print("\n❌ Could not auto-detect account owner. Pass --my-name.")
             sys.exit(1)
-        print(f"\n👤 Detected account owner: {my_name} (use --my-name to override)")
+        for plat, name in owner_by_platform.items():
+            if name:
+                print(f"\n👤 Detected {plat} owner: {name} (use --my-name to override)")
+
+        def owner_for(chat_dir: str) -> Optional[str]:
+            return owner_by_platform.get(detect_platform(chat_dir))
 
     # Run pipeline for each chat
     results = []
@@ -603,9 +709,10 @@ def main():
         try:
             result = run_chat_pipeline(
                 chat_dir=chat_dir,
-                my_name=my_name,
+                my_name=owner_for(chat_dir),
                 output_base=args.output_dir,
-                skip_visualizations=args.no_visualizations
+                skip_visualizations=args.no_visualizations,
+                platform=detect_platform(chat_dir),
             )
             results.append(result)
         except Exception as e:
