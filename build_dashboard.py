@@ -3,10 +3,10 @@
 
 Usage:
     python build_dashboard.py [--chat substr,substr] [--exclude substr,substr]
-                              [--output-dir Outputs]
+                              [--output-dir Outputs] [--dash-dir Dashboard]
 
 Scans ``Outputs/*`` for the latest analysed run of each chat and writes a
-self-contained, offline dashboard to ``Outputs/Dashboard/``. See
+self-contained, offline dashboard to ``Dashboard/`` at the repo root. See
 ``src/dashboard_export.py`` for the implementation.
 """
 

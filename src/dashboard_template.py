@@ -187,6 +187,11 @@ select:focus,input:focus,.dd-btn:focus{border-color:var(--a)}
  * compact daily table; Python only ships daily rows + lifetime.
  * ============================================================ */
 var COLORS = {a:'#4DB6AC', b:'#9E9E9E'};
+/* Fixed categorical palette for group members, assigned by lifetime rank so a
+   member keeps the same colour across every chart. Others is always grey.
+   1v1 chats never touch this — they keep COLORS.a / COLORS.b exactly. */
+var GROUP_PAL=['#4DB6AC','#E4A11B','#B5179E','#3B8EA5','#73BF69','#D64550'];
+var OTHERS_COLOR='#6b7076';
 var TEXT='#D8D9DA', MUTED='#8e9297', GRID='#2c3137', PANEL='#22262B';
 var HEAT = ['#12233a','#173a5e','#1c5cab','#2a78d6','#5598e7','#86b6ef','#cde2fb'];
 var WEEKDAYS=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
@@ -196,7 +201,7 @@ var MANIFEST = window.DASHBOARD_MANIFEST || [];
 var DATA = window.DASHBOARD_DATA = window.DASHBOARD_DATA || {};
 
 var state = {
-  chatId:null, chat:null,
+  chatId:null, chat:null, isGroup:false,
   users:[null,null],
   fullStart:null, fullEnd:null,   // Date objects (chat extent)
   start:null, end:null,           // Date objects (active range)
@@ -1307,6 +1312,365 @@ function ltCard(user,cls,inner){
 }
 
 /* ============================================================ *
+ * GROUP MODE (3+ participants)
+ * All pair-only sections are hidden; a per-member layout is
+ * rendered instead. 1v1 chats never enter any function here.
+ * ============================================================ */
+function groupMembers(){
+  var mem=(state.chat.participants||[]).slice();
+  var others=(state.chat.group&&state.chat.group.others_key)||'Others';
+  var d=state.chat.daily, hasOthers=false;
+  for(var k in d){ if(d[k][others]){ hasOthers=true; break; } }
+  if(hasOthers && mem.indexOf(others)<0) mem.push(others);
+  return {members:mem, others:others};
+}
+function memberColor(name,i,others){
+  return name===others?OTHERS_COLOR:GROUP_PAL[i%GROUP_PAL.length];
+}
+function groupBuildBuckets(members){
+  var gran=effGran(), map={}, ents=dailyEntries();
+  for(var i=0;i<ents.length;i++){
+    var ds=ents[i][0]; if(!inRange(ds)) continue;
+    var bs=bucketStart(ds,gran);
+    if(!map[bs]){ map[bs]={}; members.forEach(function(m){map[bs][m]=blank();}); }
+    var cells=ents[i][1];
+    members.forEach(function(m){ if(cells[m]) addInto(map[bs][m],cells[m]); });
+  }
+  var starts=Object.keys(map).sort();
+  return {starts:starts, ts:starts.map(function(s){return parseYMD(s).getTime();}),
+          rows:starts.map(function(s){return map[s];}), gran:gran};
+}
+function groupRangeTotals(members,startD,endD){
+  var tot={}, hours={}, combined=new Array(168).fill(0);
+  members.forEach(function(m){tot[m]=blank();hours[m]=new Array(168).fill(0);});
+  var ents=dailyEntries();
+  for(var i=0;i<ents.length;i++){
+    var ds=ents[i][0], t=parseYMD(ds).getTime();
+    if(t<startD.getTime()||t>endD.getTime()) continue;
+    var wd=(parseYMD(ds).getUTCDay()+6)%7, cells=ents[i][1];
+    members.forEach(function(m){
+      if(!cells[m]) return;
+      addInto(tot[m],cells[m]);
+      if(cells[m].hours) for(var h=0;h<24;h++){ hours[m][wd*24+h]+=cells[m].hours[h]; combined[wd*24+h]+=cells[m].hours[h]; }
+    });
+  }
+  return {tot:tot,hours:hours,combined:combined};
+}
+
+function renderSkeletonGroup(){
+  var n=(state.chat.member_count||(state.chat.participants||[]).length);
+  el('app').innerHTML =
+    section('Pulse','<div class="grid kpis" id="kpiRow"></div>')
+  + section('Story timeline',
+      card('Message volume','Stacked messages per member (+ Others) — '+esc(String(n))+' members',
+        '<div class="chart tall" id="cgVolume"></div>')
+      + card('Activity calendar','Daily total message volume across the group',
+        '<div class="chart" id="cgCal"></div>'))
+  + section('Members',
+      '<div class="grid cols-2">'
+      + card('Member share','Message share across the group (in range)','<div class="chart tall" id="cgShare"></div>')
+      + card('Who reacts to whom','Reaction giver (row) → receiver (column)','<div class="chart tall" id="cgReactMx"></div>')
+      + '</div>')
+  + section('Balance',
+      '<div class="grid cols-2">'
+      + card('Initiation share','Who opens conversations (per bucket)','<div class="chart" id="cgInit"></div>')
+      + card('Question rate','Interrogatives per 100 messages','<div class="chart" id="cgQ"></div>')
+      + '</div>')
+  + section('Affect',
+      card('Reactions given','Reactions handed out per member (per bucket)','<div class="chart" id="cgReact"></div>'))
+  + section('Rhythm',
+      card('Group activity clock','Combined messages by weekday × hour (all members)','<div class="chart" id="cgHeat"></div>'))
+  + section('Language',
+      '<div class="grid cols-2" id="nlpCards"></div>')
+  + section('Shifts vs previous period',
+      card('What changed','Per-member messages / words / reactions vs the previous window of equal length',
+        '<div class="diff" id="shiftList"></div>'))
+  + section('Pair metrics',
+      card('Hidden for groups','',
+        '<div class="placeholder" style="height:60px">Pair metrics are hidden for group chats</div>'));
+}
+
+function renderAllGroup(){
+  if(!state.chat){return;}
+  var gm=groupMembers(), members=gm.members, others=gm.others;
+  var colors=members.map(function(m,i){return memberColor(m,i,others);});
+  var b=groupBuildBuckets(members);
+  var rt=groupRangeTotals(members,state.start,state.end);
+  var has=b.starts.length>0;
+  safe(function(){renderGroupKPIs(rt,members,has);},'gkpi');
+  safe(function(){renderGroupVolume(b,members,colors);},'gvolume');
+  safe(function(){renderGroupCalendar(members);},'gcal');
+  safe(function(){renderGroupShare(rt,members,colors);},'gshare');
+  safe(function(){renderGroupReactMatrix(members);},'greactmx');
+  safe(function(){renderGroupInit(b,members,colors);},'ginit');
+  safe(function(){renderGroupQ(b,members,colors);},'gq');
+  safe(function(){renderGroupReact(b,members,colors);},'greact');
+  safe(function(){renderGroupHeat(rt);},'gheat');
+  safe(function(){renderGroupLanguage(colors);},'glang');
+  safe(function(){renderGroupShifts(rt,members);},'gshifts');
+}
+
+function renderGroupKPIs(rt,members,has){
+  var tot=rt.tot, totalMsgs=0, words=0, media=0, top=null, topv=-1;
+  members.forEach(function(m){
+    totalMsgs+=tot[m].msgs; words+=tot[m].words; media+=tot[m].media;
+    if(tot[m].msgs>topv){topv=tot[m].msgs; top=m;}
+  });
+  var days=dayDiff(state.start,state.end)+1, perDay=days>0?totalMsgs/days:0;
+  var share=totalMsgs?topv/totalMsgs:null;
+  var tiles=[
+    kpi('Messages',fmtNum(totalMsgs),null,'<span class="split faint">'+esc(String(members.length))+' members</span>'),
+    kpi('Messages / day',fmtNum(perDay),null,'<span class="split faint">over '+days+'d</span>'),
+    kpi('Words',fmtNum(words),null,''),
+    kpi('Media shared',fmtNum(media),null,''),
+    kpi('Most active member',share==null?'—':fmtPct(share),null,'<span class="split faint">'+esc(top||'—')+'</span>')
+  ];
+  el('kpiRow').innerHTML = has?tiles.join(''):'<div class="kpi"><div class="placeholder">No data in range</div></div>';
+}
+
+function renderGroupVolume(b,members,colors){
+  if(!b.starts.length){ noData('cgVolume'); return; }
+  ensureCanvas('cgVolume');
+  var series=members.map(function(m,i){
+    return {name:m,type:'line',stack:'v',
+      data:b.starts.map(function(s,j){return [b.ts[j], b.rows[j][m].msgs];}),
+      showSymbol:false,areaStyle:{color:colors[i],opacity:.55},
+      lineStyle:{width:1,color:colors[i]},itemStyle:{color:colors[i]}};
+  });
+  setChart('cgVolume',{
+    grid:baseGrid(), legend:legend(members),
+    tooltip:Object.assign(tooltipBase(),{}),
+    xAxis:timeAxis(), yAxis:valAxis({}),
+    dataZoom:[{type:'slider',bottom:2,height:16,borderColor:GRID,
+      textStyle:{color:MUTED},fillerColor:'rgba(77,182,172,.15)'},{type:'inside'}],
+    series:series
+  });
+}
+
+function renderGroupCalendar(members){
+  var byYear={},maxV=0,ents=dailyEntries();
+  for(var i=0;i<ents.length;i++){
+    var ds=ents[i][0]; if(!inRange(ds)) continue;
+    var cells=ents[i][1], v=0;
+    members.forEach(function(m){ if(cells[m]) v+=cells[m].msgs||0; });
+    if(!v) continue;
+    var y=ds.slice(0,4); (byYear[y]=byYear[y]||[]).push([ds,v]); if(v>maxV)maxV=v;
+  }
+  var years=Object.keys(byYear).sort();
+  if(!years.length){ noData('cgCal'); return; }
+  var node=el('cgCal'); if(!node) return;
+  var ROW=150, wantH=years.length*ROW+50;
+  if(node.__h!==wantH){ node.__h=wantH; node.style.height=wantH+'px';
+    if(charts['cgCal']){ try{charts['cgCal'].dispose();}catch(e){} charts['cgCal']=null; } }
+  ensureCanvas('cgCal');
+  var rangeLo=ymd(state.start), rangeHi=ymd(state.end);
+  var calendars=years.map(function(y,i){
+    var lo=(y===rangeLo.slice(0,4))?rangeLo:(y+'-01-01');
+    var hi=(y===rangeHi.slice(0,4))?rangeHi:(y+'-12-31');
+    return {top:34+i*ROW,left:46,right:20,cellSize:['auto',13],range:[lo,hi],
+      itemStyle:{color:PANEL,borderColor:GRID,borderWidth:1.5},
+      splitLine:{lineStyle:{color:GRID,width:1}},
+      dayLabel:{color:MUTED,fontSize:9,firstDay:1,nameMap:['S','M','T','W','T','F','S']},
+      monthLabel:{color:MUTED,fontSize:10},
+      yearLabel:{show:true,color:MUTED,fontSize:12,margin:28}};
+  });
+  var series=years.map(function(y,i){
+    return {type:'heatmap',coordinateSystem:'calendar',calendarIndex:i,data:byYear[y]};
+  });
+  setChart('cgCal',{
+    tooltip:{backgroundColor:PANEL,borderColor:GRID,textStyle:{color:TEXT},
+      formatter:function(p){return esc(p.value[0])+' · <b>'+fmtNum(p.value[1])+'</b> msgs';}},
+    visualMap:{min:0,max:maxV||1,orient:'horizontal',left:'center',bottom:0,
+      itemWidth:10,itemHeight:110,inRange:{color:HEAT},textStyle:{color:MUTED},calculable:false},
+    calendar:calendars, series:series
+  });
+}
+
+function renderGroupShare(rt,members,colors){
+  var tot=rt.tot, total=0;
+  var arr=members.map(function(m,i){return {m:m,v:tot[m].msgs,c:colors[i]};});
+  arr.forEach(function(x){total+=x.v;});
+  if(!total){ noData('cgShare'); return; }
+  arr.sort(function(a,b){return a.v-b.v;});   // ascending: biggest at top
+  ensureCanvas('cgShare');
+  setChart('cgShare',{
+    grid:{left:130,right:46,top:10,bottom:24},
+    tooltip:{backgroundColor:PANEL,borderColor:GRID,textStyle:{color:TEXT},
+      formatter:function(p){return esc(p.name)+': <b>'+fmtNum(p.value)+'</b> ('+(p.value/total*100).toFixed(1)+'%)';}},
+    xAxis:valAxis({}),
+    yAxis:{type:'category',data:arr.map(function(x){return x.m;}),
+      axisLabel:{color:MUTED},axisLine:{lineStyle:{color:GRID}}},
+    series:[{type:'bar',barMaxWidth:22,
+      data:arr.map(function(x){return {value:x.v,itemStyle:{color:x.c}};}),
+      label:{show:true,position:'right',color:MUTED,
+        formatter:function(p){return (p.value/total*100).toFixed(1)+'%';}}}]
+  });
+}
+
+function renderGroupReactMatrix(members){
+  var rm=(state.chat.group&&state.chat.group.reaction_matrix)||{};
+  var data=[],maxV=0;
+  members.forEach(function(g,gi){
+    members.forEach(function(r,ri){
+      var v=(rm[g]&&rm[g][r])||0; data.push([ri,gi,v]); if(v>maxV)maxV=v;
+    });
+  });
+  if(maxV<=0){ noData('cgReactMx'); return; }
+  ensureCanvas('cgReactMx');
+  setChart('cgReactMx',{
+    grid:{left:110,right:20,top:16,bottom:96},
+    tooltip:{backgroundColor:PANEL,borderColor:GRID,textStyle:{color:TEXT},
+      formatter:function(p){return esc(members[p.value[1]])+' → '+esc(members[p.value[0]])
+        +': <b>'+fmtNum(p.value[2])+'</b>';}},
+    xAxis:{type:'category',data:members,axisLabel:{color:MUTED,rotate:45,fontSize:10},axisLine:{lineStyle:{color:GRID}}},
+    yAxis:{type:'category',data:members,axisLabel:{color:MUTED,fontSize:10},axisLine:{lineStyle:{color:GRID}}},
+    visualMap:{min:0,max:maxV||1,calculable:false,orient:'horizontal',left:'center',bottom:8,
+      itemWidth:12,itemHeight:100,inRange:{color:HEAT},textStyle:{color:MUTED}},
+    series:[{type:'heatmap',data:data,itemStyle:{borderColor:PANEL,borderWidth:1},
+      emphasis:{itemStyle:{borderColor:TEXT}}}]
+  });
+}
+
+function renderGroupInit(b,members,colors){
+  if(!b.starts.length){ noData('cgInit'); return; }
+  ensureCanvas('cgInit');
+  var cats=b.starts.slice();
+  var series=members.map(function(m,i){
+    return {name:m,type:'bar',stack:'i',barMaxWidth:30,itemStyle:{color:colors[i]},
+      data:b.rows.map(function(r){ var t=0; members.forEach(function(mm){t+=r[mm].initiations;});
+        return t?+(r[m].initiations/t*100).toFixed(1):0; })};
+  });
+  setChart('cgInit',{
+    grid:baseGrid(), legend:legend(members),
+    tooltip:Object.assign(tooltipBase(),{formatter:function(ps){
+      var s=esc(ps[0].axisValue)+'<br>';
+      ps.forEach(function(p){s+=markDot(p.color)+esc(p.seriesName)+': <b>'+p.value+'%</b><br>';});
+      return s;}}),
+    xAxis:{type:'category',data:cats,axisLine:{lineStyle:{color:GRID}},axisLabel:{color:MUTED}},
+    yAxis:valAxis({max:100,axisLabel:{color:MUTED,formatter:'{value}%'}}),
+    series:series
+  });
+}
+
+function renderGroupQ(b,members,colors){
+  if(!b.starts.length){ noData('cgQ'); return; }
+  ensureCanvas('cgQ');
+  var series=members.map(function(m,i){
+    return lineSeries(m,b.starts.map(function(s,j){
+      return [b.ts[j], b.rows[j][m].msgs?+(b.rows[j][m].questions/b.rows[j][m].msgs*100).toFixed(1):null];
+    }),colors[i]);
+  });
+  setChart('cgQ',{
+    grid:baseGrid(), legend:legend(members),
+    tooltip:Object.assign(tooltipBase(),{valueFormatter:function(v){return v==null?'—':v+'/100';}}),
+    xAxis:timeAxis(), yAxis:valAxis({}), series:series
+  });
+}
+
+function renderGroupReact(b,members,colors){
+  if(!b.starts.length){ noData('cgReact'); return; }
+  ensureCanvas('cgReact');
+  var cats=b.starts.slice();
+  var series=members.map(function(m,i){
+    return {name:m,type:'bar',stack:'r',barMaxWidth:30,itemStyle:{color:colors[i]},
+      data:b.rows.map(function(r){return r[m].reactions_given;})};
+  });
+  setChart('cgReact',{
+    grid:baseGrid(), legend:legend(members),
+    tooltip:Object.assign(tooltipBase(),{axisPointer:{type:'shadow'}}),
+    xAxis:{type:'category',data:cats,axisLine:{lineStyle:{color:GRID}},axisLabel:{color:MUTED}},
+    yAxis:valAxis({}), series:series
+  });
+}
+
+function renderGroupHeat(rt){
+  var maxV=0; for(var i=0;i<168;i++) maxV=Math.max(maxV,rt.combined[i]);
+  if(maxV<=0){ noData('cgHeat'); return; }
+  ensureCanvas('cgHeat');
+  heatmap('cgHeat',rt.combined,maxV);
+}
+
+function renderGroupLanguage(colors){
+  var host=el('nlpCards'); if(!host) return;
+  var ex=state.chat.extras||{}, nm=ex.nlp_monthly||{};
+  var months=monthsInRange();
+  var top3=(state.chat.participants||[]).slice(0,3);
+  if(!months.length){
+    host.innerHTML='<div class="card"><div class="placeholder" style="height:100px">No language data in range</div></div>';
+    return;
+  }
+  function merged(user){
+    var w={},e={},total=0;
+    months.forEach(function(mo){
+      var d=(nm[mo]||{})[user]; if(!d) return;
+      (d.words||[]).forEach(function(it){w[it[0]]=(w[it[0]]||0)+it[1];});
+      (d.emojis||[]).forEach(function(it){e[it[0]]=(e[it[0]]||0)+it[1];});
+      total+=d.total||0;
+    });
+    return {w:w,e:e,total:total};
+  }
+  function top(counts,n){return Object.keys(counts).map(function(k){return [k,counts[k]];})
+    .sort(function(x,y){return y[1]-x[1];}).slice(0,n);}
+  function tags(list){ if(!list||!list.length) return '<span class="faint">—</span>';
+    return list.map(function(it){return '<span class="tag">'+esc(it[0])+'<span class="n">'+fmtNum(it[1])+'</span></span>';}).join(''); }
+  function emojiRow(list){ if(!list||!list.length) return '<span class="faint">no emojis</span>';
+    return list.map(function(it){return esc(it[0])+'<span class="n">'+fmtNum(it[1])+'</span>';}).join(''); }
+  var rangeLbl=months.length===1?months[0]:months[0]+' → '+months[months.length-1];
+  var html='';
+  top3.forEach(function(u,i){
+    var M=merged(u);
+    var dot='<span style="display:inline-block;width:9px;height:9px;border-radius:2px;'
+      +'vertical-align:middle;margin-right:4px;background:'+colors[i]+'"></span>';
+    var inner='<div class="nlp-label">Top emojis</div><div class="emoji-row">'+emojiRow(top(M.e,15))+'</div>'
+      +'<div class="nlp-label">Most used words</div><div>'+tags(top(M.w,18))+'</div>'
+      +'<div class="vocab-line">In range: <b>'+fmtNum(M.total)+'</b> content words</div>';
+    html+='<div class="card"><h3>'+dot+esc(u)+'</h3><div class="sub">'+esc(rangeLbl)+' · monthly resolution</div>'+inner+'</div>';
+  });
+  host.innerHTML=html;
+}
+
+function renderGroupShifts(rt,members){
+  var host=el('shiftList'); if(!host) return;
+  var tot=rt.tot;
+  var days=dayDiff(state.start,state.end)+1;
+  var prevEnd=addDays(state.start,-1), prevStart=addDays(state.start,-days);
+  var prt=groupRangeTotals(members,prevStart,prevEnd).tot;
+  var head='<div class="diff-head">'+esc(ymd(state.start))+' → '+esc(ymd(state.end))
+    +' &nbsp;vs&nbsp; '+esc(ymd(prevStart))+' → '+esc(ymd(prevEnd))+' ('+days+'d each)</div>';
+  var anyPrev=false; members.forEach(function(m){if(prt[m].msgs)anyPrev=true;});
+  if(!anyPrev){ host.innerHTML=head+'<div class="placeholder" style="height:70px">No data in the previous window — nothing to compare against</div>'; return; }
+  var defs=[['Messages',function(c){return c.msgs;}],
+            ['Words',function(c){return c.words;}],
+            ['Reactions',function(c){return c.reactions_given;}]];
+  var rows=[];
+  members.forEach(function(m){
+    defs.forEach(function(def){
+      var cv=def[1](tot[m]), pv=def[1](prt[m]);
+      if(cv===0&&pv===0) return;
+      var d,mag;
+      if(pv===0){ d=1; mag='new'; }
+      else { d=(cv-pv)/pv; if(Math.abs(d)<0.005) return; mag=fmtPct(Math.abs(d),Math.abs(d)<0.1?1:0); }
+      var up=d>=0;
+      rows.push({up:up,label:def[0]+' · '+m,prev:fmtNum(pv),cur:fmtNum(cv),mag:(up?'+':'−')+mag});
+    });
+  });
+  if(!rows.length){ host.innerHTML=head+'<div class="placeholder" style="height:70px">No metric changed between the two windows</div>'; return; }
+  rows.sort(function(x,y){return (y.up?1:0)-(x.up?1:0);});
+  var h=head;
+  rows.forEach(function(row){
+    h+='<div class="drow '+(row.up?'up':'down')+'">'
+      +'<span class="sign">'+(row.up?'+':'−')+'</span>'
+      +'<span class="m">'+esc(row.label)+'</span>'
+      +'<span class="vals">'+esc(row.prev)+' → '+esc(row.cur)+'</span>'
+      +'<span class="d">'+esc(row.mag)+'</span></div>';
+  });
+  host.innerHTML=h;
+}
+
+/* Dispatch between the 1v1 and group render pipelines. */
+function rerender(){ if(state.isGroup) renderAllGroup(); else renderAll(); }
+
+/* ============================================================ *
  * CONTROLS
  * ============================================================ */
 function buildPresets(){
@@ -1362,7 +1726,7 @@ function applyMonth(ym){
   if(!ym) return;
   var bnd=monthBounds(ym);
   state.start=bnd[0]; state.end=bnd[1]; state.preset=null;
-  syncControls(); renderAll();
+  syncControls(); rerender();
 }
 function activeMonth(){ // 'YYYY-MM' when the active range is exactly one (clamped) month
   var s=ymd(state.start), e=ymd(state.end);
@@ -1378,7 +1742,7 @@ function applyPreset(k){
     state.end=minD(new Date(Date.UTC(y,11,31)),state.fullEnd); }
   else { var n=+k; state.end=new Date(state.fullEnd.getTime());
     state.start=maxD(addDays(state.fullEnd,-(n-1)),state.fullStart); }
-  syncControls(); renderAll();
+  syncControls(); rerender();
 }
 function maxD(a,b){return a.getTime()>b.getTime()?a:b;}
 function minD(a,b){return a.getTime()<b.getTime()?a:b;}
@@ -1399,7 +1763,7 @@ function applyCustomRange(){
   // clamp INTO the data extent so an out-of-data range can never invert
   state.start=minD(maxD(fs,state.fullStart),state.fullEnd);
   state.end=maxD(minD(ts,state.fullEnd),state.fullStart);
-  state.preset=null; syncControls(); renderAll();
+  state.preset=null; syncControls(); rerender();
 }
 
 /* ---------- chat selector ---------- */
@@ -1411,7 +1775,8 @@ function buildChatDropdown(filter){
     var item=document.createElement('div');
     item.className='dd-item'+(m.id===state.chatId?' active':'');
     var name=document.createElement('span'); name.textContent=m.name;
-    var n=document.createElement('span'); n.className='n'; n.textContent=fmtNum(m.messages)+' msgs';
+    var n=document.createElement('span'); n.className='n';
+    n.textContent=(m.is_group?('👥 '+(m.members||'')+' · '):'')+fmtNum(m.messages)+' msgs';
     item.appendChild(name); item.appendChild(n);
     item.onclick=function(){ selectChat(m.id); closeDD(); };
     list.appendChild(item);
@@ -1438,6 +1803,7 @@ function onChatLoaded(id){
   if(!chat){ return; }
   disposeCharts();
   state.chat=chat;
+  state.isGroup=!!chat.is_group;
   state.users=(chat.participants&&chat.participants.length>=2)?
     [chat.participants[0],chat.participants[1]]:[chat.participants&&chat.participants[0]||'A','B'];
   var dates=Object.keys(chat.daily).sort();
@@ -1445,11 +1811,12 @@ function onChatLoaded(id){
   else { var t=new Date(); state.fullStart=t; state.fullEnd=t; }
   state.start=new Date(state.fullStart.getTime()); state.end=new Date(state.fullEnd.getTime());
   state.preset='all';
-  renderSkeleton();
+  if(state.isGroup) renderSkeletonGroup(); else renderSkeleton();
   buildPresets(); buildMonthPicker(); syncControls();
   if(!dates.length){ el('app').querySelectorAll('.chart').forEach(function(n){n.innerHTML='<div class="placeholder">No data in this chat</div>';});
     el('kpiRow').innerHTML='<div class="kpi"><div class="placeholder">No data</div></div>';
-    el('ltCards').innerHTML=''; return; }
+    var lt0=el('ltCards'); if(lt0) lt0.innerHTML=''; return; }
+  if(state.isGroup){ renderAllGroup(); return; }
   renderAll();
   renderLifetime();
   safe(renderTurnHist,'turnhist');
@@ -1463,7 +1830,7 @@ function init(){
   el('chatSearch').oninput=function(){ buildChatDropdown(this.value); };
   document.addEventListener('click',function(e){
     if(!el('chatDD').contains(e.target)) closeDD(); });
-  el('gran').onchange=function(){ state.gran=this.value; if(state.chat) renderAll(); };
+  el('gran').onchange=function(){ state.gran=this.value; if(state.chat) rerender(); };
   el('monthSel').onchange=function(){ if(state.chat) applyMonth(this.value); };
   el('applyRange').onclick=applyCustomRange;
   el('dFrom').onchange=function(){}; el('dTo').onchange=function(){};

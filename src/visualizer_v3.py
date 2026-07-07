@@ -37,6 +37,12 @@ class AdvancedMetricsVisualizerV3:
         """
         print(f"  Generating V3.0 advanced visualizations...")
 
+        # Group chats have no V3 pair metrics — skip the whole batch (the pair
+        # dynamics they visualise are meaningless for 3+ participants).
+        if analysis.get('group_metrics'):
+            print("  [group] skipping V3.0 pair visualizations")
+            return
+
         # Keep chart filenames within the OS byte limit for long chat titles
         from src.output_manager import truncate_component
         chat_name = truncate_component(chat_name, max_bytes=60)

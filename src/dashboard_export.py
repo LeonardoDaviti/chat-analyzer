@@ -2,7 +2,7 @@
 
 Scans ``Outputs/*`` for the latest analysed run of every chat and emits a
 self-contained, offline (``file://``) Grafana-style dashboard into
-``Outputs/Dashboard/``.
+``Dashboard/`` at the repo root (configurable via ``--dash-dir``).
 
 The heavy lifting on the client is driven by a compact **daily aggregate table**
 computed here from ``normalized.json`` (one row per user per calendar day). The
@@ -158,9 +158,19 @@ def _media_count(msg: Dict[str, Any]) -> int:
     return n
 
 
+# Pseudo-user that absorbs every sender outside the tracked top-N in a group.
+OTHERS_KEY = 'Others'
+
+
 def choose_participants(messages: List[Dict[str, Any]],
-                        fallback: Optional[List[str]] = None) -> List[str]:
-    """The two most active senders (by real-message volume), most active first."""
+                        fallback: Optional[List[str]] = None,
+                        limit: int = 2) -> List[str]:
+    """The ``limit`` most active senders (by real-message volume), active first.
+
+    ``limit`` defaults to 2 (1v1 chats — unchanged). Groups pass ``limit=6`` to
+    track the six busiest members individually; everyone else is merged into an
+    ``Others`` pseudo-user by the caller.
+    """
     counts = Counter()
     for m in messages:
         if is_real_message(m):
@@ -169,24 +179,39 @@ def choose_participants(messages: List[Dict[str, Any]],
     for u in (fallback or []):
         if u not in ranked:
             ranked.append(u)
-    while len(ranked) < 2:
+    while len(ranked) < min(2, limit):
         ranked.append(f'User {len(ranked) + 1}')
-    return ranked[:2]
+    return ranked[:limit]
 
 
 def build_daily_aggregates(messages: List[Dict[str, Any]],
                            participants: List[str],
                            timezone: str = DEFAULT_TIMEZONE,
+                           others_key: Optional[str] = None,
                            ) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """Compute the per-day, per-user aggregate table.
 
-    Only the two ``participants`` are tracked. Real-message channels use
+    The ``participants`` are tracked individually. Real-message channels use
     ``is_real_message``; reactions and media are counted over ALL messages.
+
+    When ``others_key`` is given (group chats), every sender NOT in
+    ``participants`` is folded into that single pseudo-user so a group's long
+    tail still contributes to daily volume. When it is ``None`` (1v1 chats) the
+    behaviour is exactly as before — senders outside ``participants`` are
+    dropped — so 1v1 output is byte-identical.
 
     Returns ``{ 'YYYY-MM-DD': { user: {aggregate fields...} } }`` with only the
     users that were active on that day present.
     """
-    user_set = set(participants)
+    tracked = set(participants)
+    user_set = tracked | ({others_key} if others_key else set())
+
+    def canon(name: str) -> str:
+        """Map an untracked sender to the Others pseudo-user (group mode)."""
+        if others_key and name not in tracked:
+            return others_key
+        return name
+
     daily: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(dict)
 
     def cell(date: str, user: str) -> Dict[str, Any]:
@@ -197,7 +222,7 @@ def build_daily_aggregates(messages: List[Dict[str, Any]],
 
     # --- Real-message channels (per message) ------------------------------- #
     for m in messages:
-        sender = m.get('sender_name', 'Unknown')
+        sender = canon(m.get('sender_name', 'Unknown'))
         if sender not in user_set or not is_real_message(m):
             continue
         dt = to_datetime(m.get('timestamp_ms', 0), timezone)
@@ -225,9 +250,9 @@ def build_daily_aggregates(messages: List[Dict[str, Any]],
     for m in messages:
         ts = m.get('timestamp_ms', 0)
         date = to_datetime(ts, timezone).strftime('%Y-%m-%d')
-        receiver = m.get('sender_name', 'Unknown')
+        receiver = canon(m.get('sender_name', 'Unknown'))
         for r in (m.get('reactions') or []):
-            actor = decode_georgian_text(r.get('actor', '') or '')
+            actor = canon(decode_georgian_text(r.get('actor', '') or ''))
             if actor in user_set:
                 cell(date, actor)['reactions_given'] += 1
             if receiver in user_set:
@@ -249,7 +274,11 @@ def build_daily_aggregates(messages: List[Dict[str, Any]],
 
     # --- Session-derived channels (initiations + reply latency) ------------ #
     real = [m for m in messages
-            if is_real_message(m) and m.get('sender_name') in user_set]
+            if is_real_message(m) and canon(m.get('sender_name', 'Unknown')) in user_set]
+    # In group mode rewrite each sender to its canonical (top-N or Others) name
+    # so every downstream sender read below folds the long tail into Others.
+    if others_key:
+        real = [dict(m, sender_name=canon(m.get('sender_name', 'Unknown'))) for m in real]
     real.sort(key=lambda m: m.get('timestamp_ms', 0))
     def _day(msg):
         return to_datetime(msg.get('timestamp_ms', 0), timezone).strftime('%Y-%m-%d')
@@ -288,7 +317,7 @@ def build_daily_aggregates(messages: List[Dict[str, Any]],
         # "Left on reacted": the partner reacted to the session-final message
         # instead of replying with text.
         for r in (last.get('reactions') or []):
-            actor = decode_georgian_text(r.get('actor', '') or '')
+            actor = canon(decode_georgian_text(r.get('actor', '') or ''))
             if actor in user_set and actor != l_sender:
                 cell(_day(last), actor)['reacted_leave'] += 1
 
@@ -511,6 +540,80 @@ def build_extras(messages: List[Dict[str, Any]],
     }
 
 
+def build_group_extras(messages: List[Dict[str, Any]],
+                       participants: List[str],
+                       timezone: str = DEFAULT_TIMEZONE) -> Dict[str, Any]:
+    """Group-mode extras: monthly words/emojis per tracked member only.
+
+    Distinctive vocabulary and LSM are pair concepts and are deliberately
+    skipped (``lsm_monthly`` empty; no ``distinctive``). The dashboard's group
+    Language cards need only per-member emojis + top words per month.
+    """
+    from src.word_frequency import extract_words
+
+    user_set = set(participants)
+    real = [m for m in messages
+            if is_real_message(m) and m.get('sender_name') in user_set]
+
+    m_words: Dict[str, Dict[str, Counter]] = defaultdict(
+        lambda: {u: Counter() for u in participants})
+    m_emojis: Dict[str, Dict[str, Counter]] = defaultdict(
+        lambda: {u: Counter() for u in participants})
+    m_uniq_total: Dict[str, Dict[str, List[int]]] = defaultdict(
+        lambda: {u: [0, 0] for u in participants})
+
+    for m in real:
+        u = m.get('sender_name')
+        content = m.get('content', '') or ''
+        month = to_datetime(m.get('timestamp_ms', 0), timezone).strftime('%Y-%m')
+        ws = extract_words(content)
+        m_words[month][u].update(ws)
+        for ch in _EMOJI_ONE.findall(content):
+            if ch not in _EMOJI_SKIP:
+                m_emojis[month][u][ch] += 1
+
+    for month, per_u in m_words.items():
+        for u in participants:
+            cnt = per_u[u]
+            m_uniq_total[month][u] = [len(cnt), sum(cnt.values())]
+
+    nlp_monthly = {}
+    for month in sorted(m_words):
+        nlp_monthly[month] = {}
+        for u in participants:
+            nlp_monthly[month][u] = {
+                'words': m_words[month][u].most_common(60),
+                'emojis': m_emojis[month][u].most_common(20),
+                'uniq': m_uniq_total[month][u][0],
+                'total': m_uniq_total[month][u][1],
+            }
+
+    return {
+        'turn_hist': {},
+        'media_recip': {},
+        'nlp': {},
+        'nlp_monthly': nlp_monthly,
+        'lsm_monthly': {},
+    }
+
+
+def _remap_reaction_matrix(reaction_matrix: Dict[str, Dict[str, int]],
+                           tracked: List[str],
+                           others_key: str) -> Dict[str, Dict[str, int]]:
+    """Collapse a full member×member reaction matrix onto top-N + Others."""
+    tracked_set = set(tracked)
+
+    def canon(name: str) -> str:
+        return name if name in tracked_set else others_key
+
+    out: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for giver, row in (reaction_matrix or {}).items():
+        g = canon(giver)
+        for receiver, cnt in (row or {}).items():
+            out[g][canon(receiver)] += cnt
+    return {g: dict(rr) for g, rr in out.items()}
+
+
 # --------------------------------------------------------------------------- #
 # Lifetime subset from analysis.json
 # --------------------------------------------------------------------------- #
@@ -575,12 +678,50 @@ def build_chat_payload(name: str,
         nm = decode_georgian_text(p.get('name', '') if isinstance(p, dict) else str(p))
         if nm:
             fallback.append(nm)
+
+    group_metrics = analysis.get('group_metrics') if isinstance(analysis, dict) else None
+    is_group = bool(group_metrics) or len(fallback) >= 3
+
+    if is_group:
+        # Track the top-6 busiest members individually; merge the tail into
+        # OTHERS_KEY. Guard the pathological case of a real member named
+        # 'Others' by suffixing the pseudo-user with a zero-width space.
+        participants = choose_participants(messages, fallback, limit=6)
+        others_key = OTHERS_KEY
+        if others_key in set(participants) | set(fallback):
+            others_key = OTHERS_KEY + '​'
+        daily = build_daily_aggregates(messages, participants, timezone,
+                                       others_key=others_key)
+        gm = group_metrics or {}
+        member_stats = {
+            u: {'msgs': s.get('msgs', 0), 'share': s.get('share', 0.0)}
+            for u, s in (gm.get('member_stats', {}) or {}).items()
+        }
+        group_block = {
+            'others_key': others_key,
+            'reaction_matrix': _remap_reaction_matrix(
+                gm.get('reaction_matrix', {}), participants, others_key),
+            'member_stats': member_stats,
+        }
+        return {
+            'name': name,
+            'participants': participants,
+            'is_group': True,
+            'member_count': analysis.get('member_count', len(fallback)),
+            'daily': daily,
+            'change_points': _change_points(analysis),
+            'lifetime': build_lifetime(analysis),
+            'extras': build_group_extras(messages, participants, timezone),
+            'group': group_block,
+        }
+
     participants = choose_participants(messages, fallback)
     daily = build_daily_aggregates(messages, participants, timezone)
 
     return {
         'name': name,
         'participants': participants,
+        'is_group': False,
         'daily': daily,
         'change_points': _change_points(analysis),
         'lifetime': build_lifetime(analysis),
@@ -657,6 +798,9 @@ def discover_chats(output_dir: Path, include: List[str],
     if not output_dir.exists():
         return found
     for chat_dir in sorted(output_dir.iterdir(), key=lambda p: p.name.lower()):
+        # The dashboard now lives at the repo root, so it is no longer inside
+        # the scanned Outputs tree — but keep skipping a legacy 'Dashboard'
+        # folder here for backwards compatibility with older layouts.
         if not chat_dir.is_dir() or chat_dir.name == 'Dashboard':
             continue
         if not _matches(chat_dir.name, include, exclude):
@@ -685,14 +829,20 @@ def _display_name(folder: str, normalized: Dict[str, Any],
 def run_export(output_dir: str = 'Outputs',
                include: Optional[List[str]] = None,
                exclude: Optional[List[str]] = None,
-               timezone: str = DEFAULT_TIMEZONE) -> Dict[str, Any]:
-    """Build the whole dashboard. Returns a summary dict (also printed by main)."""
+               timezone: str = DEFAULT_TIMEZONE,
+               dash_dir: str = 'Dashboard') -> Dict[str, Any]:
+    """Build the whole dashboard. Returns a summary dict (also printed by main).
+
+    ``output_dir`` is scanned for analysed runs; the finished dashboard is
+    written to ``dash_dir`` (default ``Dashboard/`` at the repo root, kept out
+    of ``Outputs/`` and git-ignored because it embeds personal data).
+    """
     from src.dashboard_template import render_index_html
 
     out_root = Path(output_dir)
     chats = discover_chats(out_root, include or [], exclude or [])
 
-    dash_dir = out_root / 'Dashboard'
+    dash_dir = Path(dash_dir)
     data_dir = dash_dir / 'data'
     data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -727,6 +877,8 @@ def run_export(output_dir: str = 'Outputs',
             'messages': messages,
             'first_date': dates[0] if dates else None,
             'last_date': dates[-1] if dates else None,
+            'is_group': bool(payload.get('is_group')),
+            'members': payload.get('member_count', 0) if payload.get('is_group') else 0,
         })
         summary_rows.append({
             'chat': name,
@@ -785,7 +937,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description='Build the interactive HTML dashboard.')
     p.add_argument('--chat', default='', help='comma-separated substrings; keep only matching chat folders')
     p.add_argument('--exclude', default='', help='comma-separated substrings; drop matching chat folders')
-    p.add_argument('--output-dir', default='Outputs', help='root Outputs directory (default: Outputs)')
+    p.add_argument('--output-dir', default='Outputs', help='root Outputs directory to scan (default: Outputs)')
+    p.add_argument('--dash-dir', default='Dashboard',
+                   help='where to write the dashboard (default: Dashboard, at the repo root)')
     return p.parse_args(argv)
 
 
@@ -799,6 +953,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         output_dir=args.output_dir,
         include=_split_csv(args.chat),
         exclude=_split_csv(args.exclude),
+        dash_dir=args.dash_dir,
     )
     _print_summary(summary)
     return 0

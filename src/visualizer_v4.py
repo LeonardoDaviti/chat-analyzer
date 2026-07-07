@@ -36,6 +36,16 @@ class MetricsVisualizerV4:
         if not users and 'message_counts' in analysis:
             users = list(analysis['message_counts'].keys())
 
+        # Group chats: skip the pair charts and render a single group overview.
+        if analysis.get('group_metrics'):
+            print("  [group] skipping V4 pair charts; rendering group overview")
+            try:
+                self._plot_group_overview(analysis['group_metrics'], chat_name)
+            except Exception as e:
+                print(f"    [error] group overview chart failed: {e}")
+            print("  V4 visualizations complete.")
+            return
+
         charts = [
             ('initiation', self._plot_initiation),
             ('question_asymmetry', self._plot_questions),
@@ -74,6 +84,60 @@ class MetricsVisualizerV4:
     def _save(self, fig, name: str):
         fig.savefig(self.output_dir / name, dpi=150, bbox_inches='tight')
         plt.close(fig)
+
+    # Group overview (member share + reaction matrix) -------------------- #
+    def _plot_group_overview(self, gm, chat_name):
+        """Single figure: member message-share bar + who-reacts-to-whom heatmap."""
+        member_stats = gm.get('member_stats', {})
+        reaction_matrix = gm.get('reaction_matrix', {})
+        # Members ordered by share, most active first.
+        members = sorted(member_stats.keys(),
+                         key=lambda u: -member_stats[u].get('msgs', 0))
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, max(5, 0.5 * len(members) + 2)))
+
+        # Left: horizontal message-share bar.
+        shares = [member_stats[u].get('share', 0.0) * 100 for u in members]
+        y = np.arange(len(members))
+        ax1.barh(y, shares, color='#4DB6AC', edgecolor='black')
+        ax1.set_yticks(y)
+        ax1.set_yticklabels(members)
+        ax1.invert_yaxis()
+        ax1.set_xlabel('Message share (%)')
+        ax1.set_title(f'Member Message Share ({len(members)} members)',
+                      fontsize=13, fontweight='bold')
+        for i, v in enumerate(shares):
+            ax1.text(v, i, f' {v:.1f}%', va='center', fontsize=9)
+
+        # Right: reaction matrix heatmap (giver row -> receiver column).
+        n = len(members)
+        idx = {u: i for i, u in enumerate(members)}
+        mat = np.zeros((n, n))
+        for giver, row in reaction_matrix.items():
+            if giver not in idx:
+                continue
+            for receiver, cnt in row.items():
+                if receiver in idx:
+                    mat[idx[giver]][idx[receiver]] = cnt
+        im = ax2.imshow(mat, cmap='magma', aspect='auto')
+        ax2.set_xticks(range(n))
+        ax2.set_yticks(range(n))
+        ax2.set_xticklabels(members, rotation=45, ha='right', fontsize=8)
+        ax2.set_yticklabels(members, fontsize=8)
+        ax2.set_xlabel('Reacted to (receiver)')
+        ax2.set_ylabel('Reactor (giver)')
+        ax2.set_title('Who Reacts to Whom', fontsize=13, fontweight='bold')
+        fig.colorbar(im, ax=ax2, fraction=0.046, pad=0.04, label='Reactions')
+        for i in range(n):
+            for j in range(n):
+                if mat[i][j] > 0:
+                    ax2.text(j, i, int(mat[i][j]), ha='center', va='center',
+                             color='white' if mat[i][j] > mat.max() / 2 else 'black',
+                             fontsize=7)
+
+        fig.suptitle(f'Group Overview - {chat_name}', fontsize=15, fontweight='bold')
+        plt.tight_layout()
+        self._save(fig, f'{chat_name}_group_overview.png')
 
     # 1. Initiation ------------------------------------------------------ #
     def _plot_initiation(self, metric, users, chat_name):

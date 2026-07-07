@@ -142,6 +142,9 @@ _SYSTEM_PATTERNS = [
     re.compile(r'^.* started a group conversation.*$'),
     re.compile(r'^.+ added .+ to the group\.?$'),
     re.compile(r'^.+ removed .+ from the group\.?$'),
+    re.compile(r'^.+ left the group\.?$'),
+    re.compile(r'^.+ created a poll.*$'),
+    re.compile(r'^.+ changed the theme.*$'),
 ]
 
 

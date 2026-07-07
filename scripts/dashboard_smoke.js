@@ -1,0 +1,150 @@
+// Dashboard smoke test — runs the real dashboard JS + real ECharts against a
+// stubbed DOM in Node, driving chat selection / presets / ranges and reporting
+// chart-render errors. No browser needed.
+//
+// Usage: node scripts/dashboard_smoke.js <path-to-Dashboard-dir>
+//
+// Caveats: the stub cannot render the calendar-coordinate chart (cCal) — its
+// failure is expected here and verified separately via ECharts SSR; real
+// browsers render it fine.
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const DASH = process.argv[2] || 'Dashboard';
+
+const html = fs.readFileSync(path.join(DASH, 'index.html'), 'utf8');
+
+// --- minimal DOM stubs ------------------------------------------------------
+function makeEl(tag) {
+  const el = {
+    tagName: (tag || 'div').toUpperCase(), children: [], style: {}, dataset: {},
+    _text: '', _html: '', className: '', value: '', id: '',
+    attributes: {}, _listeners: {}, options: [],
+    remove(i) { if (typeof i === 'number') this.options.splice(i, 1); },
+    setAttribute(k, v) { this.attributes[k] = String(v); if (k === 'id') this.id = v; },
+    getAttribute(k) { return this.attributes[k] ?? null; },
+    appendChild(c) { this.children.push(c); if (c.tagName === 'OPTION') this.options.push(c); c.parentNode = this; if (c.id) byId[c.id] = c; if (c.tagName === 'SCRIPT' && c.src) { loadScript(c.src); queue.push(() => { if (c.onload) c.onload(); }); } return c; },
+    removeChild(c) { this.children = this.children.filter(x => x !== c); return c; },
+    addEventListener(t, fn) { (this._listeners[t] ||= []).push(fn); },
+    removeEventListener() {},
+    querySelector() { return null; },
+    querySelectorAll() { return { forEach() {} }; },
+    getBoundingClientRect() { return { width: 800, height: 400, top: 0, left: 0 }; },
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    focus() {}, blur() {}, click() {},
+    getContext() {
+      return new Proxy({ measureText: (t) => ({ width: 8 * String(t).length }), createLinearGradient: () => ({ addColorStop() {} }), createRadialGradient: () => ({ addColorStop() {} }), getImageData: () => ({ data: [] }), canvas: { width: 800, height: 400 } }, { get(t, k) { return k in t ? t[k] : () => {}; }, set() { return true; } });
+    },
+    get textContent() { return this._text; },
+    set textContent(v) { this._text = String(v ?? ''); },
+    get innerHTML() {
+      return this._text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    },
+    set innerHTML(v) { this._html = String(v ?? ''); this.children = []; },
+    clientWidth: 800, clientHeight: 400, offsetWidth: 800, offsetHeight: 400,
+  };
+  return el;
+}
+const byId = {};
+for (const m of html.matchAll(/id="([^"]+)"/g)) byId[m[1]] = makeEl('div');
+for (const m of html.matchAll(/id=\\?"([A-Za-z]\w*)\\?"/g)) byId[m[1]] ||= makeEl('div');
+for (const m of html.matchAll(/id='([^']+)'/g)) byId[m[1]] ||= makeEl('div');
+const inlineJsAll = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]).join('\n');
+for (const m of inlineJsAll.matchAll(/id=\\"(\w+)\\"|id="(\w+)"/g)) { const id = m[1] || m[2]; if (id) byId[id] ||= makeEl('div'); }
+
+const scriptsLoaded = [];
+function loadScript(src) {
+  const p = path.join(DASH, src);
+  scriptsLoaded.push(src);
+  const code = fs.readFileSync(p, 'utf8');
+  vm.runInContext(code, ctx, { filename: src });
+  queue.push(() => {});
+}
+const queue = [];
+
+const documentStub = {
+  createElement: makeEl,
+  createTextNode: (t) => ({ textContent: t }),
+  getElementById: (id) => byId[id] || (byId[id] = makeEl('div')),
+  head: makeEl('head'), body: makeEl('body'),
+  addEventListener() {}, removeEventListener() {},
+  querySelector() { return null; }, querySelectorAll() { return { forEach() {} }; },
+  documentElement: makeEl('html'),
+};
+
+const sandbox = {
+  console, setTimeout: (fn) => { queue.push(fn); return 1; }, clearTimeout() {},
+  setInterval: () => 1, clearInterval() {},
+  requestAnimationFrame: (fn) => { queue.push(fn); return 1; },
+  navigator: { userAgent: 'node' },
+  location: { hash: '', href: 'file:///dash/index.html' },
+  addEventListener() {}, removeEventListener() {},
+  matchMedia: () => ({ matches: false, addListener() {}, addEventListener() {} }),
+  devicePixelRatio: 1,
+  document: documentStub,
+  Date, Math, JSON, Object, Array, String, Number, Boolean, RegExp, Error, Map, Set, Intl,
+};
+sandbox.window = sandbox;
+sandbox.globalThis = sandbox;
+const ctx = vm.createContext(sandbox);
+
+vm.runInContext(fs.readFileSync(path.join(DASH, 'echarts.min.js'), 'utf8'), ctx, { filename: 'echarts.min.js' });
+vm.runInContext(`
+  (function(){
+    var realInit = echarts.init;
+    window.__charts = 0; window.__setOptions = 0;
+    echarts.init = function(dom, theme, opts){
+      var c = realInit.call(echarts, null, null, {renderer:'svg', ssr:true, width:800, height:400});
+      window.__charts++;
+      var so = c.setOption.bind(c);
+      c.setOption = function(o, n){ window.__setOptions++; return so(o, n); };
+      c.resize = function(){}; c.dispose = function(){};
+      var on = c.on.bind(c); c.on = function(ev, fn){ try { return on(ev, fn); } catch(e) {} };
+      c.off = function(){};
+      return c;
+    };
+  })();
+`, ctx, { filename: 'patch.js' });
+
+vm.runInContext(fs.readFileSync(path.join(DASH, 'data/manifest.js'), 'utf8'), ctx, { filename: 'manifest.js' });
+
+const inlineScripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+for (const m of inlineScripts) vm.runInContext(m[1], ctx, { filename: 'inline.js' });
+for (let i = 0; i < 50 && queue.length; i++) queue.shift()();
+
+const g = (expr) => vm.runInContext(expr, ctx);
+const flush = () => { for (let i = 0; i < 50 && queue.length; i++) queue.shift()(); };
+console.log('scripts lazy-loaded:', scriptsLoaded);
+
+// isolate per-chart failures (cCal is a known stub limitation)
+try { g("(function(){var _sc=setChart; setChart=function(id,opt){try{_sc(id,opt);}catch(e){if(id!=='cCal'&&id!=='cgCal')console.log('CHART FAIL:',id,'-',e.message.slice(0,60));}};})()"); } catch (e) {}
+
+let failed = false;
+try {
+  // 1v1 chat (biggest)
+  const first = g('DASHBOARD_MANIFEST[0].id');
+  g(`selectChat(${JSON.stringify(first)})`); flush();
+  console.log('1v1', first, '| isGroup:', g('state.isGroup'), '| charts:', g('window.__charts'), '| setOptions:', g('window.__setOptions'));
+  g("applyPreset('90')");
+  g("applyPreset('all')");
+  console.log('1v1 presets OK | setOptions:', g('window.__setOptions'));
+
+  // group chat (first group in manifest, if any)
+  const gid = g('(DASHBOARD_MANIFEST.filter(function(m){return m.is_group;})[0]||{}).id');
+  if (gid) {
+    g(`selectChat(${JSON.stringify(gid)})`); flush();
+    console.log('group', gid, '| isGroup:', g('state.isGroup'), '| charts:', g('window.__charts'), '| setOptions:', g('window.__setOptions'));
+    g("applyPreset('90')");
+    console.log('group preset OK | setOptions:', g('window.__setOptions'));
+    // and back
+    g(`selectChat(${JSON.stringify(first)})`); flush();
+    console.log('back to 1v1 | isGroup:', g('state.isGroup'));
+  } else {
+    console.log('no group chats in manifest — group mode not exercised');
+  }
+} catch (e) {
+  failed = true;
+  console.log('SMOKE FAILED:', e.message, '\n', (e.stack || '').split('\n').slice(0, 3).join('\n'));
+}
+console.log(failed ? 'SMOKE FAILED' : 'SMOKE OK');
+process.exit(failed ? 1 : 0);

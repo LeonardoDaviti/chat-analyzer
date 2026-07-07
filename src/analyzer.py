@@ -38,6 +38,7 @@ from src.metrics_v4 import (
     half_life_metrics,
     change_point_metrics,
 )
+from src.group_metrics import compute_group_metrics, order_members_by_volume
 
 
 class ChatAnalyzer:
@@ -216,11 +217,45 @@ class ChatAnalyzer:
         """Get language distribution."""
         return get_language_distribution(self.messages)
     
+    @property
+    def is_group(self) -> bool:
+        """Group chats have 3+ listed participants (report §1)."""
+        return len(self.participants) >= 3
+
+    def _analyze_group(self) -> Dict[str, Any]:
+        """Group (3+ participants) analysis: core metrics + group_metrics.
+
+        The V3/V4 pair metrics are deliberately NOT computed for groups (they
+        assume a two-person dynamic); a dedicated ``group_metrics`` block takes
+        their place. ``participants`` are returned active-first by volume.
+        """
+        members = order_members_by_volume(self.messages, self.participants)
+        return {
+            'chat_info': self._get_chat_info(),
+            'message_counts': self._get_message_counts(),
+            'language_distribution': self._get_language_distribution(),
+            'day_of_week': self._get_day_of_week_stats(),
+            'first_message': self._get_first_message(),
+            'messages_per_week': self._get_messages_per_week(),
+            'yearly_stats': self._get_yearly_stats(),
+            'media_stats': self._get_media_stats(),
+            'word_frequency': self._get_word_frequency(),
+
+            'group_metrics': compute_group_metrics(
+                self.messages, self.participants, self.sessions, self.timezone),
+            'is_group': True,
+            'member_count': len(self.participants),
+            'participants': members,
+        }
+
     def analyze(self) -> Dict[str, Any]:
         """Run all analyses and return results."""
+        if self.is_group:
+            return self._analyze_group()
+
         # Get participants for V3.0 metrics
         users = self.participants
-        
+
         return {
             # Existing 10 core metrics
             'chat_info': self._get_chat_info(),

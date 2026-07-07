@@ -19,15 +19,20 @@ Usage:
 """
 
 import json
+import os
 import sys
 import time
+import zipfile
+from collections import Counter
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.data_loader import load_chat_from_dir, get_chat_name_from_dir, load_chats_from_dirs
+from src.normalizer import decode_georgian_text
 from src.session_chunker import chunk_messages, get_session_statistics
 from src.session_markdown import export_sessions_to_markdown
 from src.analyzer import ChatAnalyzer
@@ -36,28 +41,242 @@ from src.visualizer_v3 import AdvancedMetricsVisualizerV3
 from src.visualizer_v4 import MetricsVisualizerV4
 from src.output_manager import create_output_dir, save_json
 
+# Relative path, inside any export, to the folder that holds the per-chat dirs.
+_INBOX_SUFFIX = ("your_instagram_activity", "messages", "inbox")
 
-def discover_all_chats(base_dir: str) -> list[str]:
-    """Auto-discover all chat directories under the inbox."""
-    inbox = Path(base_dir) / "Chats" / "instagram-leonardodaviti-2026-04-26-oLmiaSkf" / \
-            "your_instagram_activity" / "messages" / "inbox"
-    
-    if not inbox.exists():
-        raise FileNotFoundError(f"Inbox directory not found: {inbox}")
-    
-    chat_dirs = []
-    for chat_dir in sorted(inbox.iterdir()):
-        if not chat_dir.is_dir():
-            continue
-        # any() — a glob generator is always truthy (BUG_REPORT A5)
-        has_msgs = (
-            any(chat_dir.glob("message_*.json")) or
-            (chat_dir / "combined_message.json").exists()
+
+def _find_inboxes(base_dir: Path) -> list[tuple[str, Path]]:
+    """Locate every Instagram-export inbox under ``Chats/``.
+
+    Supports two layouts:
+      * ``Chats/<export-folder>/your_instagram_activity/messages/inbox``
+        (one or more export folders side by side), and
+      * ``Chats/your_instagram_activity/messages/inbox`` (the user extracted
+        the zip directly into ``Chats/``).
+
+    Returns a list of ``(export_label, inbox_path)`` tuples.
+    """
+    chats_root = base_dir / "Chats"
+    found: list[tuple[str, Path]] = []
+
+    # Layout B: zip extracted straight into Chats/.
+    direct = chats_root.joinpath(*_INBOX_SUFFIX)
+    if direct.exists():
+        found.append(("Chats", direct))
+
+    # Layout A: one or more export folders under Chats/.
+    if chats_root.exists():
+        for sub in sorted(chats_root.iterdir()):
+            if not sub.is_dir():
+                continue
+            inbox = sub.joinpath(*_INBOX_SUFFIX)
+            if inbox.exists():
+                found.append((sub.name, inbox))
+
+    return found
+
+
+def discover_all_chats(base_dir: str) -> list[tuple[str, str]]:
+    """Auto-discover all chat directories across every export under ``Chats/``.
+
+    Returns a list of ``(export_label, chat_dir)`` tuples so callers can report
+    which export each chat came from. Multiple exports are concatenated.
+    """
+    inboxes = _find_inboxes(Path(base_dir))
+    if not inboxes:
+        raise FileNotFoundError(
+            f"No Instagram export inbox found under {Path(base_dir) / 'Chats'}. "
+            f"Expected .../your_instagram_activity/messages/inbox — "
+            f"import a download first with:  python main.py --import-zip <zip>"
         )
-        if has_msgs:
-            chat_dirs.append(str(chat_dir))
-    
-    return chat_dirs
+
+    chats: list[tuple[str, str]] = []
+    for export_label, inbox in inboxes:
+        for chat_dir in sorted(inbox.iterdir()):
+            if not chat_dir.is_dir():
+                continue
+            # any() — a glob generator is always truthy (BUG_REPORT A5)
+            has_msgs = (
+                any(chat_dir.glob("message_*.json")) or
+                (chat_dir / "combined_message.json").exists() or
+                (chat_dir / "normalized.json").exists()
+            )
+            if has_msgs:
+                chats.append((export_label, str(chat_dir)))
+
+    return chats
+
+
+def _chat_participants(chat_dir: str) -> list[str]:
+    """Decoded participant display names for a chat (cheap, no full pipeline)."""
+    p = Path(chat_dir)
+    candidates = [p / "combined_message.json", p / "normalized.json"]
+    candidates += sorted(p.glob("message_*.json"))
+    for f in candidates:
+        if not f.exists():
+            continue
+        try:
+            with open(f, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        names = []
+        for entry in data.get("participants", []) or []:
+            raw = entry.get("name", "") if isinstance(entry, dict) else str(entry)
+            name = decode_georgian_text(raw)
+            if name:
+                names.append(name)
+        if names:
+            return names
+    return []
+
+
+def _chat_thread_path(chat_dir: str) -> str:
+    """The ``thread_path`` for a chat (identifies duplicate renamed folders).
+
+    Reads whichever metadata file is available (combined/normalized/message_*);
+    ``thread_path`` is present in all of them (report §2).
+    """
+    p = Path(chat_dir)
+    candidates = [p / "combined_message.json", p / "normalized.json"]
+    candidates += sorted(p.glob("message_*.json"))
+    for f in candidates:
+        if not f.exists():
+            continue
+        try:
+            with open(f, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        tp = data.get("thread_path")
+        if tp:
+            return str(tp)
+    return ""
+
+
+def _message_bytes(chat_dir: str) -> int:
+    """Total bytes of the raw ``message_*.json`` files in a chat directory.
+
+    Used to pick the richest copy among duplicate folders (report §1: keep the
+    variant whose message files total the most bytes).
+    """
+    total = 0
+    for f in Path(chat_dir).glob("message_*.json"):
+        try:
+            total += f.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def dedup_by_thread_path(
+    discovered: list[tuple[str, str]]
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Drop duplicate chat folders that share a ``thread_path``.
+
+    Folders can be renamed copies of the same conversation (e.g. 'SemperFi' vs
+    'sempeghpghaii_…'; report §1). Among duplicates the folder whose
+    ``message_*.json`` files total the most bytes is kept.
+
+    Returns ``(kept, skipped)`` where ``skipped`` is a list of
+    ``(kept_dir, skipped_dir)`` pairs for reporting.
+    """
+    by_tp: dict[str, list[tuple[str, str]]] = {}
+    kept: list[tuple[str, str]] = []
+    skipped: list[tuple[str, str]] = []
+
+    for label, chat_dir in discovered:
+        tp = _chat_thread_path(chat_dir)
+        if not tp:
+            # No thread_path to key on — never dedup blindly, always keep.
+            kept.append((label, chat_dir))
+            continue
+        by_tp.setdefault(tp, []).append((label, chat_dir))
+
+    for tp, group in by_tp.items():
+        if len(group) == 1:
+            kept.append(group[0])
+            continue
+        winner = max(group, key=lambda ld: _message_bytes(ld[1]))
+        kept.append(winner)
+        for ld in group:
+            if ld is not winner:
+                skipped.append((winner[1], ld[1]))
+
+    return kept, skipped
+
+
+def detect_owner_from_participants(participant_lists: list[list[str]]) -> Optional[str]:
+    """Most common participant across chats = the export owner.
+
+    The account owner is the only person present in (nearly) every chat, so the
+    name appearing in the most participant lists wins. Pure function over
+    already-extracted metadata (kept separate for testability).
+    """
+    counter: Counter = Counter()
+    for parts in participant_lists:
+        for name in set(parts):  # count each chat at most once per person
+            counter[name] += 1
+    if not counter:
+        return None
+    return counter.most_common(1)[0][0]
+
+
+def detect_owner(chat_dirs: list[str]) -> Optional[str]:
+    """Auto-detect the account owner across discovered chat directories."""
+    return detect_owner_from_participants(
+        [_chat_participants(d) for d in chat_dirs]
+    )
+
+
+def import_zip(zip_path: str, base_dir: Path) -> str:
+    """Extract an Instagram export zip into ``Chats/<zipname>/`` (zip-slip safe).
+
+    Validates that ``your_instagram_activity/messages/inbox`` exists inside the
+    extracted data and prints how many chats were found. Returns the target dir.
+    """
+    zp = Path(zip_path).expanduser()
+    if not zp.exists():
+        raise FileNotFoundError(f"Zip file not found: {zp}")
+    if not zipfile.is_zipfile(zp):
+        raise ValueError(f"Not a valid zip file: {zp}")
+
+    target = (base_dir / "Chats" / zp.stem)
+    target.mkdir(parents=True, exist_ok=True)
+    target_root = target.resolve()
+
+    with zipfile.ZipFile(zp) as zf:
+        for member in zf.namelist():
+            # Reject any member that would escape the target directory
+            # (zip-slip / path traversal).
+            dest = (target / member).resolve()
+            if dest != target_root and target_root not in dest.parents:
+                raise ValueError(f"Unsafe path in zip (zip-slip blocked): {member}")
+        zf.extractall(target)
+
+    print(f"📦 Extracted '{zp.name}' → {target}")
+
+    # The inbox may be at the archive root or under a single wrapping folder.
+    inbox = target.joinpath(*_INBOX_SUFFIX)
+    if not inbox.exists():
+        matches = sorted(target.glob(os.path.join("**", *_INBOX_SUFFIX)))
+        inbox = matches[0] if matches else None
+
+    if inbox is None or not inbox.exists():
+        raise FileNotFoundError(
+            "Extracted archive does not contain "
+            "your_instagram_activity/messages/inbox — is this an Instagram "
+            "'messages' export in JSON format?"
+        )
+
+    chat_count = sum(
+        1 for d in inbox.iterdir()
+        if d.is_dir() and (any(d.glob("message_*.json")) or
+                           (d / "combined_message.json").exists())
+    )
+    print(f"✅ Import OK — found {chat_count} chat(s) in {inbox}")
+    print("   Next: run  python main.py")
+    return str(target)
 
 
 def run_chat_pipeline(
@@ -125,16 +344,28 @@ def run_chat_pipeline(
     # Print key metrics (derive names from the data, no hardcoding)
     msg_counts = analysis.get('message_counts', {})
     total = sum(msg_counts.values())
-    partner_name = next((p for p in analysis.get('participants', []) if p != my_name), None)
-    partner_count = msg_counts.get(partner_name, 0) if partner_name else 'N/A'
-    print(f"   Total: {total} | {my_name}: {msg_counts.get(my_name, 0)} | "
-          f"{partner_name or 'Other'}: {partner_count}")
-    
-    lang = analysis.get('language_distribution', {})
-    print(f"   Language: EN={lang.get('english', 0):.1f}% | MIXED={lang.get('mixed', 0):.1f}% | GEORGIAN={lang.get('georgian', 0):.1f}%")
-    
-    rt = analysis.get('response_times', {})
-    print(f"   Response time: David={rt.get('my_avg_response_minutes', 0):.1f}min | Other={rt.get('partner_avg_response_minutes', 0):.1f}min")
+
+    if analysis.get('group_metrics'):
+        # Group summary: member count + top-3 share.
+        member_count = analysis.get('member_count', len(analysis.get('participants', [])))
+        stats = analysis['group_metrics'].get('member_stats', {})
+        top3 = sorted(stats.items(), key=lambda kv: -kv[1].get('msgs', 0))[:3]
+        print(f"   Group · {member_count} members | Total: {total}")
+        top_str = ' | '.join(f"{u}: {s.get('share', 0.0) * 100:.0f}%" for u, s in top3)
+        print(f"   Top senders: {top_str}")
+        lang = analysis.get('language_distribution', {})
+        print(f"   Language: EN={lang.get('english', 0):.1f}% | MIXED={lang.get('mixed', 0):.1f}% | GEORGIAN={lang.get('georgian', 0):.1f}%")
+    else:
+        partner_name = next((p for p in analysis.get('participants', []) if p != my_name), None)
+        partner_count = msg_counts.get(partner_name, 0) if partner_name else 'N/A'
+        print(f"   Total: {total} | {my_name}: {msg_counts.get(my_name, 0)} | "
+              f"{partner_name or 'Other'}: {partner_count}")
+
+        lang = analysis.get('language_distribution', {})
+        print(f"   Language: EN={lang.get('english', 0):.1f}% | MIXED={lang.get('mixed', 0):.1f}% | GEORGIAN={lang.get('georgian', 0):.1f}%")
+
+        rt = analysis.get('response_times', {})
+        print(f"   Response time: {my_name}={rt.get('my_avg_response_minutes', 0):.1f}min | Other={rt.get('partner_avg_response_minutes', 0):.1f}min")
     
     # Step 5: Generate visualizations
     print("\n📈 Generating visualizations...")
@@ -270,64 +501,101 @@ def main():
              'appears as a substring of its directory name (mirrors --chat).'
     )
     parser.add_argument(
-        '--my-name', type=str, default='David',
-        help='Your name in the chats (default: David)'
+        '--my-name', type=str, default=None,
+        help='Your name in the chats. If omitted, it is auto-detected as the '
+             'participant present in (nearly) every chat.'
     )
     parser.add_argument(
         '--output-dir', type=str, default='Outputs',
         help='Base output directory (default: Outputs)'
     )
+    parser.add_argument(
+        '--import-zip', type=str, default=None, metavar='PATH',
+        help='Extract an Instagram export zip into Chats/<zipname>/ and exit. '
+             'Run this once before analysing.'
+    )
 
     args = parser.parse_args()
-    
+
+    base_dir = Path(__file__).parent
+
+    # Import mode: extract a download, then stop.
+    if args.import_zip:
+        try:
+            import_zip(args.import_zip, base_dir)
+        except Exception as e:
+            print(f"\n❌ Import failed: {e}")
+            sys.exit(1)
+        return
+
     print("=" * 60)
     print("Instagram Chat Analyzer - Full Pipeline")
     print("=" * 60)
-    
-    # Discover chats
-    base_dir = Path(__file__).parent
-    all_chat_dirs = discover_all_chats(str(base_dir))
-    
-    if not all_chat_dirs:
+
+    # Discover chats: list of (export_label, chat_dir)
+    discovered = discover_all_chats(str(base_dir))
+
+    if not discovered:
         print("No chats found in Chats/ directory!")
         sys.exit(1)
-    
-    print(f"\n🔍 Found {len(all_chat_dirs)} chat(s):")
-    for d in all_chat_dirs:
-        print(f"   - {d.split('/')[-1]}")
-    
+
+    # Drop duplicate folders that share a thread_path (renamed copies).
+    discovered, dupes = dedup_by_thread_path(discovered)
+    for kept_dir, skipped_dir in dupes:
+        print(f"   skipped duplicate of {kept_dir.split('/')[-1]}: "
+              f"{skipped_dir.split('/')[-1]}")
+
+    exports = sorted({label for label, _ in discovered})
+    print(f"\n🔍 Found {len(discovered)} chat(s) across {len(exports)} export(s):")
+    for label, d in discovered:
+        parts = _chat_participants(d)
+        tag = f"  [group · {len(parts)} members]" if len(parts) >= 3 else ""
+        print(f"   - [{label}] {d.split('/')[-1]}{tag}")
+
     # Filter by --chat if specified
     if args.chat:
         targets = [c.strip() for c in args.chat.split(',')]
-        filtered = [d for d in all_chat_dirs if any(t in d for t in targets)]
+        filtered = [(l, d) for (l, d) in discovered if any(t in d for t in targets)]
         if not filtered:
             print(f"\n❌ No chats matching: {args.chat}")
             sys.exit(1)
-        chat_dirs = filtered
-        print(f"\n📋 Processing {len(chat_dirs)} chat(s): {[d.split('/')[-1] for d in chat_dirs]}")
+        selected = filtered
+        print(f"\n📋 Processing {len(selected)} chat(s): {[d.split('/')[-1] for _, d in selected]}")
     else:
-        chat_dirs = all_chat_dirs
+        selected = list(discovered)
 
     # Exclude by --exclude if specified (substring match on directory name,
     # mirroring the --chat inclusion logic)
     if args.exclude:
         excludes = [c.strip() for c in args.exclude.split(',') if c.strip()]
-        before = len(chat_dirs)
-        chat_dirs = [d for d in chat_dirs if not any(x in d for x in excludes)]
-        skipped = before - len(chat_dirs)
+        before = len(selected)
+        selected = [(l, d) for (l, d) in selected if not any(x in d for x in excludes)]
+        skipped = before - len(selected)
         if skipped:
             print(f"\n🚫 Excluded {skipped} chat(s) matching: {args.exclude}")
-        if not chat_dirs:
+        if not selected:
             print(f"\n❌ All chats were excluded by: {args.exclude}")
             sys.exit(1)
-    
+
+    # Resolve account owner name: explicit override or auto-detect over ALL
+    # discovered chats (so filtering to one chat still detects correctly).
+    my_name = args.my_name
+    if my_name:
+        print(f"\n👤 Account owner: {my_name} (from --my-name)")
+    else:
+        my_name = detect_owner([d for _, d in discovered])
+        if not my_name:
+            print("\n❌ Could not auto-detect account owner. Pass --my-name.")
+            sys.exit(1)
+        print(f"\n👤 Detected account owner: {my_name} (use --my-name to override)")
+
     # Run pipeline for each chat
     results = []
-    for chat_dir in chat_dirs:
+    for _label, chat_dir in selected:
         try:
             result = run_chat_pipeline(
                 chat_dir=chat_dir,
-                my_name=args.my_name,
+                my_name=my_name,
                 output_base=args.output_dir
             )
             results.append(result)

@@ -1,157 +1,241 @@
-# Instagram Chat Analyzer V3.0
+# Instagram Chat Analyzer
 
-A Python tool for analyzing Instagram chat exports and generating comprehensive analytics with advanced psychological metrics and visualizations.
+Turn your own Instagram chats into clear charts and an interactive dashboard.
 
-## Features
+This tool looks at the messages in your Instagram conversations and shows you
+things like who texts more, how fast each person replies, when you talk during
+the day, how the tone changes over months, which words each person uses, and
+much more.
 
-### 10 Core Analysis Metrics:
-
-1. **Message Distribution** - Who sends more messages (you vs partner)
-2. **Language Distribution** - Georgian, English, or Mixed content ratio
-3. **Day of Week Analysis** - Which days have the most communication
-4. **First Message** - When the conversation started
-5. **Messages Per Week** - Weekly activity trends grouped by year
-6. **Yearly Statistics** - Top sender and message counts per year
-7. **Response Time Analysis** - Average response times and who delays more
-8. **Media Statistics** - Photos, videos, audio files, and shares per sender
-9. **Word Frequency** - Top 50 most used words per participant
-10. **Chat Information** - Participants, total messages, date range
+**Everything runs on your own computer.** Your messages are never uploaded
+anywhere. There is no account, no cloud, and no internet connection needed to
+do the analysis. The results are plain files and a web page that live in a
+folder on your machine.
 
 ---
 
-### 14 V3.0 Advanced Psychological Metrics:
+## What you need
 
-11. **Expressive Lengthening Index** - Frequency of elongated words (e.g., 'heyyy', 'noooo') indicating emotional expressiveness
-12. **Emotional Cooling Alerts** - Detects sudden drops (>40%) in expressiveness over 14-day periods
-13. **Final Word Dominance** - Who consistently sends the last message in conversation sessions
-14. **Thought Fragmentation Index** - Tendency to break thoughts into rapid-fire messages (3+ in 15 seconds)
-15. **Conversational Entropy** - Shannon entropy on bigram distribution (low = repetitive/rut, high = dynamic)
-16. **Defensiveness Index** - Usage of justification/shielding words (just, but, technically, უბრალოდ, მარა)
-17. **Vocabulary Contagion Rate** - Who adopts whose slang (cultural driver vs adopter)
-18. **Selective Topic Avoidance** - Topics causing severe response delays (>3σ above baseline)
-19. **Conversational Gini Coefficient** - Economic inequality of effort (rolling 30-day)
-20. **Conversational Inertia** - Force (characters) required to restart a dead chat (>72h gap)
-21. **Signal to Noise Ratio** - Depth of conversation vs idle filler
-22. **Chaser/Retreater Oscillation** - Anxious-avoidant pursuit dynamics (rolling 3-day correlation)
-23. **Tit-for-Tat Retaliation Score** - Intentional mirroring of delayed responses (Game Theory)
-24. **Temporal Syncopation Variance** - Unpredictability of conversational rhythm (Music Theory)
+- A computer running Windows, macOS, or Linux.
+- About 20 minutes (plus waiting time for Instagram to prepare your data).
+- Your own Instagram data download (steps below).
 
-## Project Structure
+---
+
+## Step 1 — Get your Instagram data
+
+You have to ask Instagram for a copy of your messages. This is a normal,
+built-in feature. Do it from the Instagram app or from instagram.com.
+
+1. Open Instagram and go to **Settings**.
+2. Tap **Accounts Center**.
+3. Tap **Your information and permissions**.
+4. Tap **Download your information**.
+5. Tap **Download or transfer information**.
+6. Choose the **account** you want to analyze.
+7. Choose **Some of your information** (not everything).
+8. In the list, tick **Messages** only. Leave everything else unticked.
+9. Tap **Next** / **Download to device**.
+10. Now set the options carefully:
+    - **Format: JSON** — this is the most important setting. It must be JSON,
+      *not* HTML. (If you pick HTML, the tool cannot read your data.)
+    - **Media quality: Low** — keeps the download small; photos are not needed.
+    - **Date range: All time** — so you get your full history.
+11. Tap **Create files** / **Submit request**.
+12. Now wait. Instagram prepares the file in the background. This can take
+    anywhere from a few minutes to a couple of days. You will get an email
+    and/or a notification when it is ready.
+13. When it is ready, open the email or the Download your information page and
+    **download the ZIP file** to your computer. Remember where you saved it
+    (for example, your Downloads folder).
+
+You now have a file with a name like `instagram-yourname-2026-...zip`.
+
+---
+
+## Step 2 — Set up the tool
+
+You only do this part once.
+
+### 2a. Install Python
+
+This tool needs **Python 3.11 or newer**.
+
+- Download it from **https://www.python.org/downloads/** and run the installer.
+- **On Windows:** on the first screen of the installer, tick the box that says
+  **"Add Python to PATH"** before clicking Install. This matters.
+
+To check it worked, open a terminal (see below) and type `python --version`
+(on some systems `python3 --version`). You should see a version number of 3.11
+or higher.
+
+- **Windows terminal:** press the Start button, type **PowerShell**, open it.
+- **macOS terminal:** open the **Terminal** app (in Applications → Utilities).
+- **Linux terminal:** open your usual terminal app.
+
+### 2b. Get the project
+
+Download this project as a ZIP from its page (green **Code** button →
+**Download ZIP**) and unzip it, or, if you know git:
 
 ```
-Instagram Analysis/
-├── src/
-│   ├── __init__.py
-│   ├── data_loader.py       # JSON loading and parsing
-│   ├── analyzer.py          # Core analysis logic (10 metrics)
-│   ├── analyzer_v3.py       # V3.0 advanced metrics (14 metrics)
-│   ├── statistics.py        # Statistical calculations
-│   ├── language_detection.py # Language detection
-│   ├── word_frequency.py    # Word frequency analysis
-│   ├── response_time.py     # Response time calculations
-│   ├── media_analyzer.py    # Media statistics
-│   ├── visualizer.py        # Core plot generation (6 charts)
-│   └── visualizer_v3.py     # V3.0 visualizations (15 charts)
-├── outputs/
-│   ├── analysis/            # Per-chat JSON analysis files
-│   └── visualizations/      # Generated charts
-├── main.py                  # Entry point
-├── requirements.txt         # Dependencies
-├── venv/                    # Virtual environment
-├── README.md
-└── V3_METRICS_IMPLEMENTATION_PLAN.md
+git clone <the-project-url>
 ```
 
-## Installation
+Then, in your terminal, go into the project folder. For example:
 
-```bash
-cd "/home/normie/Projects/Instagram Analysis"
+```
+cd "Instagram Analysis"
+```
+
+### 2c. Create the environment and install
+
+Copy and paste these commands into your terminal.
+
+**Linux / macOS:**
+
+```
+python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-## Usage
+**Windows (PowerShell):**
 
-### Test Run (Pre-configured)
+```
+python -m venv venv
+venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
 
-The `main.py` is configured to analyze two test chats:
-- mariammerabishvili_1756493205749663
-- mariakhorava_17913165954160425
+After this, your terminal prompt usually shows `(venv)` at the start. That
+means the environment is active. If you close the terminal and come back later,
+just run the `activate` line again before using the tool.
 
-```bash
-source venv/bin/activate
+---
+
+## Step 3 — Run the analysis
+
+### 3a. Import your download
+
+Point the tool at the ZIP file you got from Instagram:
+
+```
+python main.py --import-zip path/to/your-download.zip
+```
+
+Replace `path/to/your-download.zip` with the real location of your file (for
+example on Windows `C:\Users\You\Downloads\instagram-yourname-2026.zip`). This
+copies your chats into the project's `Chats/` folder and tells you how many
+conversations it found.
+
+### 3b. Analyze everything
+
+```
 python main.py
 ```
 
-### Output Files
+That's it. The tool finds all your chats, figures out **which name is yours**
+automatically (it's the person who appears in every conversation), and analyzes
+each chat. You'll see a line like:
 
-After running, you'll find:
-
-**Analysis JSON files** in `outputs/analysis/`:
-- `{chat_name}_analysis.json` - Detailed analysis for each chat
-- `all_chats_analysis.json` - Combined analysis of all chats
-
-**Visualizations** in `outputs/visualizations/`:
-
-### Core Visualizations (6 charts):
-- `{chat_name}_message_distribution.png` - Pie chart of message counts
-- `{chat_name}_day_of_week.png` - Bar chart of messages by day
-- `{chat_name}_yearly_trends.png` - Line chart of yearly activity
-- `{chat_name}_response_times.png` - Bar chart comparing response times
-- `{chat_name}_language_distribution.png` - Pie chart of language usage
-- `{chat_name}_{participant}_word_frequency.png` - Top words bar charts
-
-### V3.0 Advanced Visualizations (15 charts):
-- `{chat_name}_v3_expressive_lengthening.png` - Emotional expressiveness bar chart
-- `{chat_name}_v3_emotional_cooling_alerts.png` - Cold shift detection timeline
-- `{chat_name}_v3_final_word_dominance.png` - Session ending dominance (bar + pie)
-- `{chat_name}_v3_thought_fragmentation.png` - Rapid-fire messaging analysis
-- `{chat_name}_v3_conversational_entropy.png` - Rut vs dynamic over time
-- `{chat_name}_v3_defensiveness_index.png` - Shielding word usage per 1000 words
-- `{chat_name}_v3_vocabulary_contagion.png` - Word adoption heatmap
-- `{chat_name}_v3_topic_avoidance.png` - Delayed response topics
-- `{chat_name}_v3_gini_coefficient.png` - Effort inequality over time
-- `{chat_name}_v3_conversational_inertia.png` - Chat revival effort gauge
-- `{chat_name}_v3_signal_to_noise_ratio.png` - Conversation depth analysis
-- `{chat_name}_v3_chaser_retreater.png` - Anxious-avoidant pattern detection
-- `{chat_name}_v3_tit_for_tat_retaliation.png` - Delay mirroring score
-- `{chat_name}_v3_temporal_syncopation.png` - Rhythm unpredictability
-- `{chat_name}_v3_dashboard.png` - Comprehensive V3.0 overview dashboard
-
-## Test Results
-
-### Chat 1: drxnem
-- **Total messages**: 2,109
-- **Message distribution**: drxnem (1,030) vs David (1,079)
-- **Language**: 67.75% English, 32.25% Georgian
-- **First message**: 2025-05-31 21:20
-- **V3.0 Insights**:
-  - Expressive Lengthening: David (0.011) > drxnem (0.0016)
-  - Final Word Dominance: drxnem ends 62.6% of sessions
-  - Cold Shifts Detected: 4 (Dec 2025 - Feb 2026)
-  - Chaser/Retreater Pattern: 10 instances detected
-  - Vocabulary Contagion: drxnem adopted 39 words from David
-
-### Chat 2: Mariam Merabishvili
-- **Total messages**: 3,051
-- **Message distribution**: David (1,064) vs Mariam (1,987)
-- **Language**: 94.56% Georgian, 5.44% English
-- **First message**: 2025-05-25 19:20
-- **Response time**: You average 178.58 min, Partner averages 22.44 min
-
-## Configuration
-
-To change your name in the analysis, edit `main.py`:
-
-```python
-MY_NAME = "David"  # Change to your name as it appears in chats
+```
+Detected account owner: David (use --my-name to override)
 ```
 
-To add more chats, modify the `CHAT_PATHS` list in `main.py`.
+If it guesses your name wrong, you can set it yourself:
 
-## Dependencies
+```
+python main.py --my-name "Your Name"
+```
 
-- matplotlib >= 3.7.0
-- numpy >= 1.24.0
-- pandas >= 2.0.0
-- python-dateutil >= 2.8.0
+Analyzing many chats can take a little while. When it finishes, results are
+saved in a folder called `Outputs/`.
+
+### 3c. Build the dashboard
+
+```
+python build_dashboard.py
+```
+
+Then open the file **`Dashboard/index.html`** by double-clicking it. It opens
+in your normal web browser as a private local page.
+
+### Analyzing only some chats
+
+You can focus on one or a few conversations by name:
+
+```
+python main.py --chat "Mariam"
+python build_dashboard.py --chat "Mariam"
+```
+
+Or analyze everything but skip some chats:
+
+```
+python main.py --exclude "Group Chat,Spam Account"
+```
+
+---
+
+## What you get
+
+**In the `Outputs/` folder** — for each chat, a set of image charts (message
+balance, busiest days, reply times, language mix, top words, and more), plus
+the raw numbers as data files if you ever want them.
+
+**In `Dashboard/index.html`** — one interactive page tying it all together. You
+pick a chat, drag a time slider, and every panel updates. It includes:
+
+- **Pulse** — the headline numbers: total messages, who sends more, typical
+  reply times, active days.
+- **Timeline** — activity over time, with automatic markers where something
+  clearly changed (a spike, a cooling-off, a shift in balance).
+- **Balance & depth** — how evenly the conversation is shared, how long each
+  person's "turns" run, and how deep versus casual the talk is.
+- **Endings & restarts** — who tends to send the last message, who re-opens a
+  quiet chat, and who gets "left on read" or "left on reacted".
+- **Psycholinguistics** — gentle language signals like we/you/I balance, warm
+  versus cold wording, and thank-yous and apologies.
+- **Language cards** — each person's favourite words and emojis, most
+  distinctive vocabulary, and how varied their language is.
+- **Shifts** — a before-and-after comparison of two time periods so you can see
+  what changed between them.
+
+None of this is a judgement or a diagnosis — it's just a friendly, detailed
+mirror of the patterns in your own conversations.
+
+---
+
+## Privacy
+
+- The analysis runs **100% on your computer**. Nothing is sent over the
+  internet.
+- Your chats (`Chats/`), the results (`Outputs/`), and the dashboard
+  (`Dashboard/`) are all kept out of version control on purpose, so they can't
+  be accidentally shared or committed.
+- The dashboard is a plain local file. Opening it does not upload anything; it
+  simply reads the data already on your machine.
+
+---
+
+## Frequently asked questions
+
+**I downloaded my data but the files end in `.html`, not `.json`.**
+Instagram gave you the wrong format. Go back to Download your information and
+request it again, and this time choose **format: JSON**. The tool can only read
+JSON exports.
+
+**The Georgian text or emojis look broken/garbled in the raw export.**
+That's normal — Instagram stores them in a mangled way in the export file. The
+tool automatically fixes (decodes) them, so the charts and dashboard show them
+correctly. You don't need to do anything.
+
+**How do I analyze just one conversation?**
+Use the `--chat` option with part of the person's name, for example
+`python main.py --chat "Mariam"` and then
+`python build_dashboard.py --chat "Mariam"`.
+
+**Where are my results?**
+Charts and data are in `Outputs/`. The interactive page is
+`Dashboard/index.html` — double-click it to open it in your browser.

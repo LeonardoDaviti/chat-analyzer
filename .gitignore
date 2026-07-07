@@ -3,6 +3,9 @@ Chats/
 Outputs/
 outputs/
 
+# Generated dashboard (embeds personal chat data — never commit)
+Dashboard/
+
 # Virtual environment
 venv/
 .venv/
