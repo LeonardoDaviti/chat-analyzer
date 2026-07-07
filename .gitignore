@@ -28,5 +28,7 @@ Thumbs.db
 normalized_cache.json
 
 # Generated research / analysis docs
-docs/COMPETITIVE_ANALYSIS.md
 group_chat_schema_report.md
+V3_METRICS_IMPLEMENTATION_PLAN.md
+# All dev docs (development-only, never public)
+docs/
