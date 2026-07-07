@@ -93,7 +93,7 @@ select:focus,input:focus,.dd-btn:focus{border-color:var(--a)}
   display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
 .kpi .delta{font-size:12px;font-weight:600}
 .kpi .delta.up{color:var(--good)} .kpi .delta.down{color:var(--bad)}
-.kpi .split{font-size:13px;margin-top:4px;font-variant-numeric:tabular-nums}
+.kpi .split{display:block;font-size:13px;margin-top:4px;font-variant-numeric:tabular-nums}
 .dotA,.dotB{display:inline-block;width:9px;height:9px;border-radius:2px;vertical-align:middle;margin-right:4px}
 .dotA{background:var(--a)} .dotB{background:var(--b)}
 
@@ -105,6 +105,30 @@ select:focus,input:focus,.dd-btn:focus{border-color:var(--a)}
 .legend-inline{display:flex;gap:16px;font-size:12px;color:var(--muted);margin-bottom:8px}
 .cols-2{grid-template-columns:repeat(2,1fr)}
 @media(max-width:900px){.cols-2{grid-template-columns:1fr}}
+
+/* shifts diff (git-style) */
+.diff{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
+.diff .drow{display:flex;gap:10px;padding:5px 10px;border-left:3px solid transparent;
+  border-radius:4px;margin:2px 0;align-items:baseline}
+.diff .drow.up{background:rgba(115,191,105,.08);border-left-color:var(--good)}
+.diff .drow.down{background:rgba(224,47,68,.08);border-left-color:var(--bad)}
+.diff .sign{width:12px;font-weight:700}
+.diff .drow.up .sign,.diff .drow.up .d{color:var(--good)}
+.diff .drow.down .sign,.diff .drow.down .d{color:var(--bad)}
+.diff .m{flex:1;color:var(--text)}
+.diff .vals{color:var(--muted);white-space:nowrap}
+.diff .d{font-weight:600;min-width:70px;text-align:right}
+.diff-head{font-size:11px;color:var(--faint);margin:0 0 8px 2px}
+
+/* language / NLP cards */
+.tag{display:inline-block;padding:2px 9px;margin:2px 3px 2px 0;border-radius:10px;
+  background:var(--panel-2);border:1px solid var(--border);font-size:12px;color:var(--text)}
+.tag .n{color:var(--faint);margin-left:5px;font-size:11px}
+.tag.hot{border-color:var(--a)}
+.emoji-row{font-size:20px;line-height:1.7;letter-spacing:2px;word-break:break-all}
+.emoji-row .n{font-size:11px;color:var(--faint);letter-spacing:0;vertical-align:super;margin:0 6px 0 1px}
+.nlp-label{font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--faint);margin:10px 0 4px}
+.vocab-line{font-size:12px;color:var(--muted);margin-top:10px;font-variant-numeric:tabular-nums}
 </style>
 </head>
 <body data-palette="#4DB6AC,#9E9E9E">
@@ -132,6 +156,10 @@ select:focus,input:focus,.dd-btn:focus{border-color:var(--a)}
         <input type="date" id="dTo">
         <button id="applyRange">Apply</button>
       </div>
+    </div>
+    <div class="control">
+      <label>Month</label>
+      <select id="monthSel"><option value="">Pick month…</option></select>
     </div>
     <div class="control">
       <label>Granularity</label>
@@ -213,7 +241,10 @@ function inRange(dateStr){
   return t>=state.start.getTime() && t<=state.end.getTime();
 }
 function blank(){return {msgs:0,words:0,chars:0,emoji:0,questions:0,night_msgs:0,
-  reactions_given:0,reactions_received:0,media:0,resp_lat_sum_min:0,resp_lat_n:0,initiations:0};}
+  reactions_given:0,reactions_received:0,media:0,photos:0,videos:0,voice:0,shares:0,
+  turns:0,turns_answered:0,endings:0,self_restarts:0,reacted_leave:0,
+  wait_reply_sum_min:0,wait_reply_n:0,resp_lat_sum_min:0,resp_lat_n:0,initiations:0,
+  we_words:0,i_words:0,you_words:0,pos_words:0,neg_words:0,gratitude:0,apology:0};}
 function addInto(acc,cell){
   for(var k in acc){ if(cell[k]!=null) acc[k]+=cell[k]; }
 }
@@ -309,11 +340,16 @@ function renderSkeleton(){
   section('Pulse','<div class="grid kpis" id="kpiRow"></div>')
   + section('Story timeline',
       card('Message volume','A above the line, partner mirrored below · change-points marked',
-        '<div class="chart tall" id="cVolume"></div>'))
-  + section('Balance',
+        '<div class="chart tall" id="cVolume"></div>')
+      + card('Activity calendar','Daily message volume — spot streaks, bursts and silences at a glance',
+        '<div class="chart" id="cCal"></div>'))
+  + section('Balance & depth',
       '<div class="grid cols-2">'
       + card('Initiation share','Who opens conversations (per bucket)','<div class="chart" id="cInit"></div>')
       + card('Question rate','Interrogatives per 100 messages','<div class="chart" id="cQ"></div>')
+      + card('Message depth','Average words per TURN — a full thought, however many messages it was split into','<div class="chart" id="cDepth"></div>')
+      + card('Monologue ↔ dialogue','Average messages per turn — how long each person talks before the other interjects','<div class="chart" id="cTurns"></div>')
+      + card('Turn length distribution','How many messages a turn usually holds (all-time)','<div class="chart" id="cTurnHist"></div>')
       + '</div>')
   + section('Responsiveness',
       card('Median in-session reply latency','Minutes · display capped near p95','<div class="chart" id="cLat"></div>'))
@@ -321,6 +357,7 @@ function renderSkeleton(){
       '<div class="grid cols-2">'
       + card('Reactions given','Acknowledgement channel','<div class="chart" id="cReact"></div>')
       + card('Emoji per 100 messages','Expressiveness channel','<div class="chart" id="cEmoji"></div>')
+      + card('Media mix','What kind of media each person shares (in range)','<div class="chart" id="cMedia"></div>')
       + '</div>')
   + section('Rhythm',
       '<div class="grid cols-2">'
@@ -328,6 +365,26 @@ function renderSkeleton(){
       + card('Activity clock · '+esc(B),'Messages by weekday × hour','<div class="chart" id="cHeatB"></div>')
       + '</div>'
       + card('Night share','Share of messages during 23:00–02:59','<div class="chart short" id="cNight"></div>'))
+  + section('Endings & restarts',
+      '<div class="grid cols-2">'
+      + card('Final word share','Who is left unanswered when a conversation dies (per bucket)','<div class="chart" id="cEnd"></div>')
+      + card('Restart behavior','Re-knocks = restarting although your own last message was never answered · reacted-and-left counts','<div class="chart" id="cRestart"></div>')
+      + card('Waiting eagerness','After waiting 1h+ for a reply — how fast the waiter answers once it lands (lower = they were waiting by the phone)','<div class="chart" id="cWait"></div>')
+      + card('Talks into the void','Share of turns that ended the session with no answer','<div class="chart" id="cVoid"></div>')
+      + '</div>')
+  + section('Psycholinguistics',
+      '<div class="grid cols-2">'
+      + card('We-ness','Share of we/us vs I/me pronouns — "we-talk" is a replicated predictor of relationship quality','<div class="chart" id="cWe"></div>')
+      + card('Positivity balance','Positive vs negative affect words (lexicon-based) · dashed line = Gottman 5:1 ratio','<div class="chart" id="cSent"></div>')
+      + card('Language style matching','Similarity of function-word usage (pronouns, conjunctions, negations…) — the standard computational rapport measure','<div class="chart" id="cLSM"></div>')
+      + card('Vocabulary richness','Unique words / total words per month — falling diversity can signal a conversational rut','<div class="chart" id="cTTR"></div>')
+      + card('Courtesy markers','Gratitude and apologies per 100 messages (in range)','<div id="courtesyBox" style="min-height:120px"></div>')
+      + '</div>')
+  + section('Language',
+      '<div class="grid cols-2" id="nlpCards"></div>')
+  + section('Shifts vs previous period',
+      card('What changed','Every metric that moved, current range compared to the previous window of equal length',
+        '<div class="diff" id="shiftList"></div>'))
   + section('All-time lifetime metrics',
       '<div class="grid cols-2" id="ltCards"></div>');
 }
@@ -344,14 +401,24 @@ function renderAll(){
   var b=buildBuckets();
   var rt=rangeTotals(state.start,state.end);
   var hasData=b.starts.length>0;
-  renderKPIs(rt,hasData);
-  renderVolume(b);
-  renderBalance(b);
-  renderResponsiveness(b);
-  renderAffect(b);
-  renderRhythm(rt,b);
-  // Lifetime cards are range-independent; render once per chat.
+  safe(function(){renderKPIs(rt,hasData);},'kpi');
+  safe(function(){renderVolume(b);},'volume');
+  safe(renderCalendar,'calendar');
+  safe(function(){renderBalance(b);},'balance');
+  safe(function(){renderDepth(b);},'depth');
+  safe(function(){renderTurns(b);},'turns');
+  safe(function(){renderResponsiveness(b);},'latency');
+  safe(function(){renderAffect(b);},'affect');
+  safe(function(){renderMediaMix(rt);},'media');
+  safe(function(){renderRhythm(rt,b);},'rhythm');
+  safe(function(){renderEndings(b,rt);},'endings');
+  safe(function(){renderPsycho(b,rt);},'psycho');
+  safe(renderLanguage,'language');
+  safe(function(){renderShifts(rt);},'shifts');
+  // Lifetime + turn-hist cards are range-independent; rendered per chat.
 }
+/* One broken chart must never take down the rest of the page. */
+function safe(fn,tag){ try{fn();}catch(e){ try{console.error('render '+tag+' failed:',e);}catch(_){} } }
 
 function noData(id){
   var c=getChart(id);
@@ -365,41 +432,109 @@ function ensureCanvas(id){
 }
 
 /* ---- KPI row ---- */
+/* Relative change vs a previous value; null when no baseline. */
+function relDelta(cur,prev){
+  if(cur==null||prev==null||!isFinite(prev)||prev===0) return null;
+  return (cur-prev)/prev;
+}
+/* previous equal-length window totals for the active range */
+function prevWindowTotals(){
+  var days=dayDiff(state.start,state.end)+1;
+  var prevEnd=addDays(state.start,-1), prevStart=addDays(state.start,-days);
+  return {days:days, start:prevStart, end:prevEnd,
+          tot:rangeTotals(prevStart,prevEnd).tot};
+}
 function renderKPIs(rt,hasData){
   var A=state.users[0],B=state.users[1];
-  var tot=rt.tot, days=dayDiff(state.start,state.end)+1;
+  var tot=rt.tot;
+  var pw=prevWindowTotals(), prev=pw.tot, days=pw.days;
+  var hasPrev=(prev.A.msgs+prev.B.msgs)>0;
+
   var totalMsgs=tot.A.msgs+tot.B.msgs;
   var perDay=days>0?totalMsgs/days:0;
-  // previous equal-length window
-  var prevEnd=addDays(state.start,-1), prevStart=addDays(state.start,-days);
-  var prev=rangeTotals(prevStart,prevEnd);
-  var prevTotal=prev.tot.A.msgs+prev.tot.B.msgs;
+  var prevTotal=prev.A.msgs+prev.B.msgs;
   var prevPerDay=days>0?prevTotal/days:0;
-  var delta=prevPerDay>0?(perDay-prevPerDay)/prevPerDay:null;
 
   var latA=tot.A.resp_lat_n?tot.A.resp_lat_sum_min/tot.A.resp_lat_n:null;
   var latB=tot.B.resp_lat_n?tot.B.resp_lat_sum_min/tot.B.resp_lat_n:null;
+  var latAll=(tot.A.resp_lat_n+tot.B.resp_lat_n)>0?
+    (tot.A.resp_lat_sum_min+tot.B.resp_lat_sum_min)/(tot.A.resp_lat_n+tot.B.resp_lat_n):null;
+  var pLatAll=(prev.A.resp_lat_n+prev.B.resp_lat_n)>0?
+    (prev.A.resp_lat_sum_min+prev.B.resp_lat_sum_min)/(prev.A.resp_lat_n+prev.B.resp_lat_n):null;
+
   var initTot=tot.A.initiations+tot.B.initiations;
   var initA=initTot?tot.A.initiations/initTot:null;
+  var pInitTot=prev.A.initiations+prev.B.initiations;
+  var pInitA=pInitTot?prev.A.initiations/pInitTot:null;
+
+  var reacts=tot.A.reactions_given+tot.B.reactions_given;
+  var pReacts=prev.A.reactions_given+prev.B.reactions_given;
+
   var nightTot=tot.A.night_msgs+tot.B.night_msgs;
   var nightShare=totalMsgs?nightTot/totalMsgs:null;
+  var pNightShare=prevTotal?(prev.A.night_msgs+prev.B.night_msgs)/prevTotal:null;
+
+  // when there is no previous window at all, suppress all delta chips
+  function D(v,opts){ if(!hasPrev||v==null||!isFinite(v)) return null;
+    var o=opts||{}; return {v:v,invert:!!o.invert,pp:!!o.pp}; }
+
+  var words=tot.A.words+tot.B.words, pWords=prev.A.words+prev.B.words;
+  var mediaT=tot.A.media+tot.B.media, pMediaT=prev.A.media+prev.B.media;
+  var turnsT=tot.A.turns+tot.B.turns;
+  var dlg=totalMsgs?turnsT/totalMsgs:null; // 100% = strict turn-taking
+  var pMsgsT=prev.A.msgs+prev.B.msgs, pTurnsT=prev.A.turns+prev.B.turns;
+  var pDlg=pMsgsT?pTurnsT/pMsgsT:null;
+  var kinds='📷 '+fmtNum(tot.A.photos+tot.B.photos)+' · 🎥 '+fmtNum(tot.A.videos+tot.B.videos)
+    +' · 🎙 '+fmtNum(tot.A.voice+tot.B.voice)+' · 🔗 '+fmtNum(tot.A.shares+tot.B.shares);
 
   var tiles=[];
-  tiles.push(kpi('Messages', fmtNum(totalMsgs), null,
+  tiles.push(kpi('Messages', fmtNum(totalMsgs),
+     D(relDelta(totalMsgs,prevTotal)),
      '<span class="split"><span class="dotA"></span>'+fmtNum(tot.A.msgs)
      +' &nbsp;<span class="dotB"></span>'+fmtNum(tot.B.msgs)+'</span>'));
   tiles.push(kpi('Messages / day', fmtNum(perDay),
-     delta==null?null:{v:delta}, '<span class="split faint">vs prev '+days+'d</span>'));
-  tiles.push(kpi('Reply latency', fmtDur(latA==null&&latB==null?null:0), null,
+     D(relDelta(perDay,prevPerDay)),
+     '<span class="split faint">vs prev '+days+'d</span>'));
+  tiles.push(kpi('Words', fmtNum(words),
+     D(relDelta(words,pWords)),
+     '<span class="split"><span class="dotA"></span>'+fmtNum(tot.A.words)
+     +' &nbsp;<span class="dotB"></span>'+fmtNum(tot.B.words)+'</span>'));
+  tiles.push(kpi('Media shared', fmtNum(mediaT),
+     D(relDelta(mediaT,pMediaT)),
+     '<span class="split"><span class="dotA"></span>'+fmtNum(tot.A.media)
+     +' &nbsp;<span class="dotB"></span>'+fmtNum(tot.B.media)+'</span>'
+     +'<span class="split faint">'+kinds+'</span>'));
+  tiles.push(kpi('Dialogue index', dlg==null?'—':fmtPct(dlg),
+     D(dlg!=null&&pDlg!=null?dlg-pDlg:null,{pp:true}),
+     '<span class="split faint">100% = strict turn-taking</span>'));
+  var endT=tot.A.endings+tot.B.endings, pEndT=prev.A.endings+prev.B.endings;
+  var endA=endT?tot.A.endings/endT:null;
+  var pEndA=pEndT?prev.A.endings/pEndT:null;
+  tiles.push(kpi('Final word', endA==null?'—':fmtPct(endA),
+     D(endA!=null&&pEndA!=null?endA-pEndA:null,{pp:true}),
+     '<span class="split"><span class="dotA"></span>'+fmtNum(tot.A.endings)
+     +' &nbsp;<span class="dotB"></span>'+fmtNum(tot.B.endings)+'</span>'));
+  var weT=tot.A.we_words+tot.B.we_words, iT=tot.A.i_words+tot.B.i_words;
+  var weness=(weT+iT)?weT/(weT+iT):null;
+  var pWeT=prev.A.we_words+prev.B.we_words, pIT=prev.A.i_words+prev.B.i_words;
+  var pWeness=(pWeT+pIT)?pWeT/(pWeT+pIT):null;
+  tiles.push(kpi('We-ness', weness==null?'—':fmtPct(weness),
+     D(weness!=null&&pWeness!=null?weness-pWeness:null,{pp:true}),
+     '<span class="split faint">we/us vs I/me talk</span>'));
+  tiles.push(kpi('Reply latency', fmtDur(latAll),
+     D(relDelta(latAll,pLatAll),{invert:true}),
      '<span class="split"><span class="dotA"></span>'+fmtDur(latA)
-     +' &nbsp;<span class="dotB"></span>'+fmtDur(latB)+'</span>', true));
-  tiles.push(kpi('Initiation', initA==null?'—':fmtPct(initA), null,
+     +' &nbsp;<span class="dotB"></span>'+fmtDur(latB)+'</span>'));
+  tiles.push(kpi('Initiation', initA==null?'—':fmtPct(initA),
+     D(initA!=null&&pInitA!=null?initA-pInitA:null,{pp:true}),
      '<span class="split"><span class="dotA"></span>'+fmtPct(initA)
      +' &nbsp;<span class="dotB"></span>'+(initA==null?'—':fmtPct(1-initA))+'</span>'));
-  tiles.push(kpi('Reactions given', fmtNum(tot.A.reactions_given+tot.B.reactions_given), null,
+  tiles.push(kpi('Reactions given', fmtNum(reacts),
+     D(relDelta(reacts,pReacts)),
      '<span class="split"><span class="dotA"></span>'+fmtNum(tot.A.reactions_given)
      +' &nbsp;<span class="dotB"></span>'+fmtNum(tot.B.reactions_given)+'</span>'));
-  tiles.push(kpi('Night share', nightShare==null?'—':fmtPct(nightShare), null,
+  tiles.push(kpi('Night share', nightShare==null?'—':fmtPct(nightShare),
+     D(nightShare!=null&&pNightShare!=null?nightShare-pNightShare:null,{pp:true}),
      '<span class="split faint">23:00–02:59</span>'));
 
   el('kpiRow').innerHTML = hasData ? tiles.join('')
@@ -407,9 +542,11 @@ function renderKPIs(rt,hasData){
 }
 function kpi(label,value,delta,extra,hideValue){
   var d='';
-  if(delta&&delta.v!=null){
-    var up=delta.v>=0; d='<span class="delta '+(up?'up':'down')+'">'
-      +(up?'▲ ':'▼ ')+fmtPct(Math.abs(delta.v),0)+'</span>';
+  if(delta&&delta.v!=null&&isFinite(delta.v)){
+    var up=delta.v>=0;
+    var good=delta.invert?!up:up;   // e.g. latency going up is bad
+    var mag=delta.pp?(Math.abs(delta.v)*100).toFixed(1)+'pp':fmtPct(Math.abs(delta.v),0);
+    d='<span class="delta '+(good?'up':'down')+'">'+(up?'▲ ':'▼ ')+mag+'</span>';
   }
   var val = hideValue ? '' : '<span>'+value+'</span>';
   return '<div class="kpi"><div class="label">'+esc(label)+'</div>'
@@ -494,8 +631,16 @@ function renderAllExceptVolumeZoom(){
   // re-render dependent charts + KPIs but leave the master zoom interaction intact
   var b=buildBuckets(); var rt=rangeTotals(state.start,state.end);
   var has=b.starts.length>0;
-  renderKPIs(rt,has); renderBalance(b); renderResponsiveness(b);
-  renderAffect(b); renderRhythm(rt,b);
+  safe(function(){renderKPIs(rt,has);},'kpi'); safe(renderCalendar,'calendar');
+  safe(function(){renderBalance(b);},'balance'); safe(function(){renderDepth(b);},'depth');
+  safe(function(){renderTurns(b);},'turns');
+  safe(function(){renderResponsiveness(b);},'latency'); safe(function(){renderAffect(b);},'affect');
+  safe(function(){renderMediaMix(rt);},'media');
+  safe(function(){renderRhythm(rt,b);},'rhythm');
+  safe(function(){renderEndings(b,rt);},'endings');
+  safe(function(){renderPsycho(b,rt);},'psycho');
+  safe(renderLanguage,'language');
+  safe(function(){renderShifts(rt);},'shifts');
 }
 function clampDate(d){
   var t=d.getTime();
@@ -609,6 +754,262 @@ function renderAffect(b){
   });
 }
 
+/* ---- Endings & restarts ---- */
+function renderEndings(b,rt){
+  var A=state.users[0],B=state.users[1];
+  if(!b.starts.length){ noData('cEnd'); noData('cRestart'); noData('cWait'); noData('cVoid'); return; }
+  // Final word share (stacked 100%)
+  ensureCanvas('cEnd');
+  var ea=[],eb=[],cats=[];
+  for(var i=0;i<b.starts.length;i++){
+    var t=b.rows[i].A.endings+b.rows[i].B.endings;
+    cats.push(b.starts[i]);
+    ea.push(t?+(b.rows[i].A.endings/t*100).toFixed(1):0);
+    eb.push(t?+(b.rows[i].B.endings/t*100).toFixed(1):0);
+  }
+  setChart('cEnd',{
+    grid:baseGrid(), legend:legend([A,B]),
+    tooltip:Object.assign(tooltipBase(),{formatter:function(ps){
+      var s=esc(ps[0].axisValue)+'<br>';
+      ps.forEach(function(p){s+=markDot(p.color)+esc(p.seriesName)+': <b>'+p.value+'%</b><br>';});
+      return s;}}),
+    xAxis:{type:'category',data:cats,axisLine:{lineStyle:{color:GRID}},axisLabel:{color:MUTED}},
+    yAxis:valAxis({max:100,axisLabel:{color:MUTED,formatter:'{value}%'}}),
+    series:[
+      {name:A,type:'bar',stack:'e',data:ea,itemStyle:{color:COLORS.a},barMaxWidth:30},
+      {name:B,type:'bar',stack:'e',data:eb,itemStyle:{color:COLORS.b},barMaxWidth:30}
+    ]
+  });
+  // Restart behavior (range totals, grouped by category)
+  ensureCanvas('cRestart');
+  var tot=rt.tot;
+  var catsR=['Re-knocks (no reply came)','Restarts after a reply','Reacted & left'];
+  var va=[tot.A.self_restarts, Math.max(0,tot.A.initiations-tot.A.self_restarts), tot.A.reacted_leave];
+  var vb=[tot.B.self_restarts, Math.max(0,tot.B.initiations-tot.B.self_restarts), tot.B.reacted_leave];
+  setChart('cRestart',{
+    grid:baseGrid(), legend:legend([A,B]),
+    tooltip:Object.assign(tooltipBase(),{axisPointer:{type:'shadow'}}),
+    xAxis:{type:'category',data:catsR,axisLine:{lineStyle:{color:GRID}},
+      axisLabel:{color:MUTED,fontSize:10,interval:0}},
+    yAxis:valAxis({}),
+    series:[
+      {name:A,type:'bar',data:va,itemStyle:{color:COLORS.a},barMaxWidth:30,barGap:'15%'},
+      {name:B,type:'bar',data:vb,itemStyle:{color:COLORS.b},barMaxWidth:30}
+    ]
+  });
+  // Waiting eagerness (avg minutes to answer a long-awaited reply)
+  ensureCanvas('cWait');
+  var wa=[],wb=[],anyW=false;
+  for(var j=0;j<b.starts.length;j++){
+    var ts=b.ts[j], rA=b.rows[j].A, rB=b.rows[j].B;
+    var va2=rA.wait_reply_n?rA.wait_reply_sum_min/rA.wait_reply_n:null;
+    var vb2=rB.wait_reply_n?rB.wait_reply_sum_min/rB.wait_reply_n:null;
+    if(va2!=null||vb2!=null) anyW=true;
+    wa.push([ts,va2==null?null:+va2.toFixed(2)]);
+    wb.push([ts,vb2==null?null:+vb2.toFixed(2)]);
+  }
+  if(!anyW){ noData('cWait'); }
+  else setChart('cWait',{
+    grid:baseGrid(), legend:legend([A,B]),
+    tooltip:Object.assign(tooltipBase(),{valueFormatter:function(v){return v==null?'—':fmtDur(v);}}),
+    xAxis:timeAxis(), yAxis:valAxis({axisLabel:{color:MUTED,formatter:function(v){return v+'m';}}}),
+    series:[ lineSeries(A,wa,COLORS.a), lineSeries(B,wb,COLORS.b) ]
+  });
+  // Talks into the void: (turns - answered) / turns
+  ensureCanvas('cVoid');
+  var vva=[],vvb=[];
+  for(var k=0;k<b.starts.length;k++){
+    var ts2=b.ts[k], rA2=b.rows[k].A, rB2=b.rows[k].B;
+    vva.push([ts2, rA2.turns?+((rA2.turns-rA2.turns_answered)/rA2.turns*100).toFixed(1):null]);
+    vvb.push([ts2, rB2.turns?+((rB2.turns-rB2.turns_answered)/rB2.turns*100).toFixed(1):null]);
+  }
+  setChart('cVoid',{
+    grid:baseGrid(), legend:legend([A,B]),
+    tooltip:Object.assign(tooltipBase(),{valueFormatter:function(v){return v==null?'—':v+'%';}}),
+    xAxis:timeAxis(), yAxis:valAxis({axisLabel:{color:MUTED,formatter:'{value}%'}}),
+    series:[ lineSeries(A,vva,COLORS.a), lineSeries(B,vvb,COLORS.b) ]
+  });
+}
+
+/* ---- Turn length distribution (all-time, from extras) ---- */
+function renderTurnHist(){
+  var ex=state.chat.extras||{}; var th=ex.turn_hist||{};
+  var A=state.users[0],B=state.users[1];
+  var keys=['1','2','3','4','5','6','7','8','9','10+'];
+  var ha=th[A]||{}, hb=th[B]||{};
+  var sum=0; keys.forEach(function(k){sum+=(ha[k]||0)+(hb[k]||0);});
+  if(!sum){ noData('cTurnHist'); return; }
+  ensureCanvas('cTurnHist');
+  setChart('cTurnHist',{
+    grid:baseGrid(), legend:legend([A,B]),
+    tooltip:Object.assign(tooltipBase(),{axisPointer:{type:'shadow'}}),
+    xAxis:{type:'category',data:keys,name:'msgs / turn',nameLocation:'middle',nameGap:26,
+      nameTextStyle:{color:MUTED,fontSize:10},
+      axisLine:{lineStyle:{color:GRID}},axisLabel:{color:MUTED}},
+    yAxis:valAxis({}),
+    series:[
+      {name:A,type:'bar',data:keys.map(function(k){return ha[k]||0;}),itemStyle:{color:COLORS.a},barMaxWidth:18,barGap:'10%'},
+      {name:B,type:'bar',data:keys.map(function(k){return hb[k]||0;}),itemStyle:{color:COLORS.b},barMaxWidth:18}
+    ]
+  });
+}
+
+/* ---- Language cards (range-scoped: merged from monthly NLP blocks) ---- */
+function monthsInRange(){
+  var lo=ymd(state.start).slice(0,7), hi=ymd(state.end).slice(0,7);
+  var ex=state.chat.extras||{}; var nm=ex.nlp_monthly||{};
+  return Object.keys(nm).filter(function(m){return m>=lo&&m<=hi;}).sort();
+}
+function renderLanguage(){
+  var host=el('nlpCards'); if(!host) return;
+  var ex=state.chat.extras||{}; var nm=ex.nlp_monthly||{};
+  var A=state.users[0],B=state.users[1];
+  var months=monthsInRange();
+  if(!months.length){
+    host.innerHTML='<div class="card"><div class="placeholder" style="height:100px">No language data in range</div></div>';
+    return;
+  }
+  // merge monthly counters over the active range
+  function merged(user){
+    var w={}, e={}, uniq=0, total=0;
+    months.forEach(function(mo){
+      var d=(nm[mo]||{})[user]; if(!d) return;
+      (d.words||[]).forEach(function(it){w[it[0]]=(w[it[0]]||0)+it[1];});
+      (d.emojis||[]).forEach(function(it){e[it[0]]=(e[it[0]]||0)+it[1];});
+      uniq+=d.uniq||0; total+=d.total||0;
+    });
+    return {w:w,e:e,uniq:uniq,total:total};
+  }
+  var MA=merged(A), MB=merged(B);
+  function top(counts,n){
+    return Object.keys(counts).map(function(k){return [k,counts[k]];})
+      .sort(function(x,y){return y[1]-x[1];}).slice(0,n);
+  }
+  // distinctive: log-odds with +1 smoothing over the merged range counts
+  function distinctive(mine,other){
+    var tu=0,to=0,k;
+    for(k in mine.w) tu+=mine.w[k];
+    for(k in other.w) to+=other.w[k];
+    if(!tu) return [];
+    var outArr=[];
+    for(k in mine.w){
+      var cu=mine.w[k], co=other.w[k]||0;
+      if(cu+co<5) continue;
+      var score=Math.log((cu+1)/(tu-cu+1))-Math.log((co+1)/(to-co+1));
+      if(score>0) outArr.push([k,cu,score]);
+    }
+    outArr.sort(function(x,y){return y[2]-x[2];});
+    return outArr.slice(0,12).map(function(it){return [it[0],it[1]];});
+  }
+  function tags(list,hot){
+    if(!list||!list.length) return '<span class="faint">—</span>';
+    return list.map(function(it){
+      return '<span class="tag'+(hot?' hot':'')+'">'+esc(it[0])
+        +'<span class="n">'+fmtNum(it[1])+'</span></span>';
+    }).join('');
+  }
+  function emojiRow(list){
+    if(!list||!list.length) return '<span class="faint">no emojis</span>';
+    return list.map(function(it){
+      return esc(it[0])+'<span class="n">'+fmtNum(it[1])+'</span>';
+    }).join('');
+  }
+  var rangeLbl=months.length===1?months[0]:months[0]+' → '+months[months.length-1];
+  function cardFor(user,cls,M,other){
+    var inner=
+      '<div class="nlp-label">Top emojis</div><div class="emoji-row">'+emojiRow(top(M.e,15))+'</div>'
+      +'<div class="nlp-label">Signature words (used far more than the other)</div><div>'+tags(distinctive(M,other),true)+'</div>'
+      +'<div class="nlp-label">Most used words</div><div>'+tags(top(M.w,18),false)+'</div>'
+      +'<div class="vocab-line">In range: <b>'+fmtNum(M.total)+'</b> content words</div>';
+    return '<div class="card"><h3><span class="dot'+(cls==='a'?'A':'B')+'"></span> '+esc(user)
+      +'</h3><div class="sub">'+esc(rangeLbl)+' · monthly resolution</div>'+inner+'</div>';
+  }
+  host.innerHTML=cardFor(A,'a',MA,MB)+cardFor(B,'b',MB,MA);
+}
+
+/* ---- Psycholinguistics: we-ness, sentiment, LSM, TTR, courtesy ---- */
+function renderPsycho(b,rt){
+  var A=state.users[0],B=state.users[1];
+  var ex=state.chat.extras||{};
+  if(!b.starts.length){ noData('cWe'); noData('cSent'); noData('cLSM'); noData('cTTR');
+    var cb0=el('courtesyBox'); if(cb0) cb0.innerHTML='<div class="placeholder">No data in range</div>';
+    return; }
+  // We-ness per bucket
+  ensureCanvas('cWe');
+  var wa=[],wb=[];
+  for(var i=0;i<b.starts.length;i++){
+    var ts=b.ts[i], rA=b.rows[i].A, rB=b.rows[i].B;
+    var da=rA.we_words+rA.i_words, db=rB.we_words+rB.i_words;
+    wa.push([ts, da?+(rA.we_words/da*100).toFixed(1):null]);
+    wb.push([ts, db?+(rB.we_words/db*100).toFixed(1):null]);
+  }
+  setChart('cWe',{
+    grid:baseGrid(), legend:legend([A,B]),
+    tooltip:Object.assign(tooltipBase(),{valueFormatter:function(v){return v==null?'—':v+'%';}}),
+    xAxis:timeAxis(), yAxis:valAxis({axisLabel:{color:MUTED,formatter:'{value}%'}}),
+    series:[ lineSeries(A,wa,COLORS.a), lineSeries(B,wb,COLORS.b) ]
+  });
+  // Positivity balance per bucket, with Gottman 5:1 (83.3%) reference
+  ensureCanvas('cSent');
+  var sa=[],sb=[];
+  for(var j=0;j<b.starts.length;j++){
+    var ts2=b.ts[j], rA2=b.rows[j].A, rB2=b.rows[j].B;
+    var ta=rA2.pos_words+rA2.neg_words, tb=rB2.pos_words+rB2.neg_words;
+    sa.push([ts2, ta?+(rA2.pos_words/ta*100).toFixed(1):null]);
+    sb.push([ts2, tb?+(rB2.pos_words/tb*100).toFixed(1):null]);
+  }
+  setChart('cSent',{
+    grid:baseGrid(), legend:legend([A,B]),
+    tooltip:Object.assign(tooltipBase(),{valueFormatter:function(v){return v==null?'—':v+'% positive';}}),
+    xAxis:timeAxis(), yAxis:valAxis({max:100,axisLabel:{color:MUTED,formatter:'{value}%'}}),
+    series:[ lineSeries(A,sa,COLORS.a), lineSeries(B,sb,COLORS.b),
+      {name:'5:1',type:'line',showSymbol:false,silent:true,
+       data:b.ts.map(function(t){return [t,83.3];}),
+       lineStyle:{color:MUTED,type:'dashed',width:1},itemStyle:{color:MUTED},tooltip:{show:false}} ]
+  });
+  // LSM per month (couple-level), filtered to range months
+  var months=monthsInRange();
+  var lsm=ex.lsm_monthly||{};
+  var lsmPts=months.map(function(mo){
+    return [parseYMD(mo+'-01').getTime(), lsm[mo]==null?null:+(lsm[mo]*100).toFixed(1)];
+  }).filter(function(p){return p[1]!=null;});
+  if(!lsmPts.length){ noData('cLSM'); }
+  else { ensureCanvas('cLSM');
+    setChart('cLSM',{
+      grid:baseGrid(),
+      tooltip:Object.assign(tooltipBase(),{valueFormatter:function(v){return v==null?'—':v+'%';}}),
+      xAxis:timeAxis(), yAxis:valAxis({max:100,axisLabel:{color:MUTED,formatter:'{value}%'}}),
+      series:[ lineSeries('Style matching',lsmPts,COLORS.a) ]
+    }); }
+  // Vocabulary richness (TTR) per month per user
+  var nm=ex.nlp_monthly||{};
+  var ttrA=[],ttrB=[];
+  months.forEach(function(mo){
+    var t=parseYMD(mo+'-01').getTime();
+    var da2=(nm[mo]||{})[A], db2=(nm[mo]||{})[B];
+    if(da2&&da2.total>=100) ttrA.push([t,+(da2.uniq/da2.total*100).toFixed(1)]);
+    if(db2&&db2.total>=100) ttrB.push([t,+(db2.uniq/db2.total*100).toFixed(1)]);
+  });
+  if(!ttrA.length&&!ttrB.length){ noData('cTTR'); }
+  else { ensureCanvas('cTTR');
+    setChart('cTTR',{
+      grid:baseGrid(), legend:legend([A,B]),
+      tooltip:Object.assign(tooltipBase(),{valueFormatter:function(v){return v==null?'—':v+'%';}}),
+      xAxis:timeAxis(), yAxis:valAxis({axisLabel:{color:MUTED,formatter:'{value}%'}}),
+      series:[ lineSeries(A,ttrA,COLORS.a), lineSeries(B,ttrB,COLORS.b) ]
+    }); }
+  // Courtesy markers (range totals per 100 msgs)
+  var cb=el('courtesyBox'); if(!cb) return;
+  var tot=rt.tot;
+  function row(user,cls,c){
+    var g=c.msgs?(c.gratitude/c.msgs*100):null, ap=c.msgs?(c.apology/c.msgs*100):null;
+    return '<div style="margin:10px 0"><span class="dot'+cls+'"></span> <b>'+esc(user)+'</b>'
+      +'<div class="vocab-line">🙏 gratitude: <b>'+fmtNum(c.gratitude)+'</b> ('+(g==null?'—':g.toFixed(1))+'/100 msgs)'
+      +' &nbsp;·&nbsp; 🙇 apologies: <b>'+fmtNum(c.apology)+'</b> ('+(ap==null?'—':ap.toFixed(1))+'/100 msgs)</div></div>';
+  }
+  cb.innerHTML=row(A,'A',tot.A)+row(B,'B',tot.B);
+}
+
 /* ---- Rhythm: two 7x24 heatmaps + night-share line ---- */
 function renderRhythm(rt,b){
   var A=state.users[0],B=state.users[1];
@@ -650,6 +1051,214 @@ function heatmap(id,flat,maxV){
   });
 }
 
+/* ---- Activity calendar (GitHub-style daily heatmap) ---- */
+function renderCalendar(){
+  var A=state.users[0],B=state.users[1];
+  var byYear={}, maxV=0, ents=dailyEntries();
+  for(var i=0;i<ents.length;i++){
+    var ds=ents[i][0]; if(!inRange(ds)) continue;
+    var cells=ents[i][1];
+    var v=(cells[A]?cells[A].msgs||0:0)+(cells[B]?cells[B].msgs||0:0);
+    if(!v) continue;
+    var y=ds.slice(0,4);
+    (byYear[y]=byYear[y]||[]).push([ds,v]);
+    if(v>maxV) maxV=v;
+  }
+  var years=Object.keys(byYear).sort();
+  if(!years.length){ noData('cCal'); return; }
+  var node=el('cCal'); if(!node) return;
+  var ROW=150;
+  var wantH=years.length*ROW+50;
+  if(node.__h!==wantH){                 // height changed -> re-init the chart
+    node.__h=wantH; node.style.height=wantH+'px';
+    if(charts['cCal']){ try{charts['cCal'].dispose();}catch(e){} charts['cCal']=null; }
+  }
+  ensureCanvas('cCal');
+  var rangeLo=ymd(state.start), rangeHi=ymd(state.end);
+  var calendars=years.map(function(y,i){
+    var lo=(y===rangeLo.slice(0,4))?rangeLo:(y+'-01-01');
+    var hi=(y===rangeHi.slice(0,4))?rangeHi:(y+'-12-31');
+    return {top:34+i*ROW,left:46,right:20,cellSize:['auto',13],range:[lo,hi],
+      itemStyle:{color:PANEL,borderColor:GRID,borderWidth:1.5},
+      splitLine:{lineStyle:{color:GRID,width:1}},
+      dayLabel:{color:MUTED,fontSize:9,firstDay:1,nameMap:['S','M','T','W','T','F','S']},
+      monthLabel:{color:MUTED,fontSize:10},
+      yearLabel:{show:true,color:MUTED,fontSize:12,margin:28}};
+  });
+  var series=years.map(function(y,i){
+    return {type:'heatmap',coordinateSystem:'calendar',calendarIndex:i,data:byYear[y]};
+  });
+  setChart('cCal',{
+    tooltip:{backgroundColor:PANEL,borderColor:GRID,textStyle:{color:TEXT},
+      formatter:function(p){return esc(p.value[0])+' · <b>'+fmtNum(p.value[1])+'</b> msgs';}},
+    visualMap:{min:0,max:maxV||1,orient:'horizontal',left:'center',bottom:0,
+      itemWidth:10,itemHeight:110,inRange:{color:HEAT},textStyle:{color:MUTED},calculable:false},
+    calendar:calendars,
+    series:series
+  });
+}
+
+/* ---- Message depth: average words per TURN (a turn = consecutive run of
+   messages by one person, ended by the partner or a session gap). Someone who
+   splits one thought into five short messages still gets the full thought's
+   word count credited to a single turn. ---- */
+function renderDepth(b){
+  var A=state.users[0],B=state.users[1];
+  if(!b.starts.length){ noData('cDepth'); return; }
+  ensureCanvas('cDepth');
+  var da=[],db=[];
+  for(var i=0;i<b.starts.length;i++){
+    var ts=b.ts[i], rA=b.rows[i].A, rB=b.rows[i].B;
+    da.push([ts, rA.turns?+(rA.words/rA.turns).toFixed(2):null]);
+    db.push([ts, rB.turns?+(rB.words/rB.turns).toFixed(2):null]);
+  }
+  setChart('cDepth',{
+    grid:baseGrid(), legend:legend([A,B]),
+    tooltip:Object.assign(tooltipBase(),{valueFormatter:function(v){return v==null?'—':v+' w/turn';}}),
+    xAxis:timeAxis(), yAxis:valAxis({}),
+    series:[ lineSeries(A,da,COLORS.a), lineSeries(B,db,COLORS.b) ]
+  });
+}
+
+/* ---- Monologue vs dialogue: average messages per turn ---- */
+function renderTurns(b){
+  var A=state.users[0],B=state.users[1];
+  if(!b.starts.length){ noData('cTurns'); return; }
+  ensureCanvas('cTurns');
+  var ta=[],tb=[];
+  for(var i=0;i<b.starts.length;i++){
+    var ts=b.ts[i], rA=b.rows[i].A, rB=b.rows[i].B;
+    ta.push([ts, rA.turns?+(rA.msgs/rA.turns).toFixed(2):null]);
+    tb.push([ts, rB.turns?+(rB.msgs/rB.turns).toFixed(2):null]);
+  }
+  setChart('cTurns',{
+    grid:baseGrid(), legend:legend([A,B]),
+    tooltip:Object.assign(tooltipBase(),{valueFormatter:function(v){return v==null?'—':v+' msg/turn';}}),
+    xAxis:timeAxis(),
+    yAxis:valAxis({min:1}),
+    series:[ lineSeries(A,ta,COLORS.a), lineSeries(B,tb,COLORS.b),
+      {name:'dialogue line',type:'line',showSymbol:false,silent:true,
+       data:b.ts.map(function(t){return [t,1];}),
+       lineStyle:{color:MUTED,type:'dashed',width:1},itemStyle:{color:MUTED},
+       tooltip:{show:false}} ]
+  });
+}
+
+/* ---- Media mix: kinds per person (range-scoped) ---- */
+function renderMediaMix(rt){
+  var A=state.users[0],B=state.users[1];
+  var tot=rt.tot;
+  var kinds=['Photos','Videos','Voice','Shares'];
+  var va=[tot.A.photos,tot.A.videos,tot.A.voice,tot.A.shares];
+  var vb=[tot.B.photos,tot.B.videos,tot.B.voice,tot.B.shares];
+  var sum=0; va.concat(vb).forEach(function(v){sum+=v;});
+  if(!sum){ noData('cMedia'); return; }
+  ensureCanvas('cMedia');
+  setChart('cMedia',{
+    grid:baseGrid(), legend:legend([A,B]),
+    tooltip:Object.assign(tooltipBase(),{axisPointer:{type:'shadow'}}),
+    xAxis:{type:'category',data:kinds,axisLine:{lineStyle:{color:GRID}},axisLabel:{color:MUTED}},
+    yAxis:valAxis({}),
+    series:[
+      {name:A,type:'bar',data:va,itemStyle:{color:COLORS.a},barMaxWidth:34,barGap:'15%'},
+      {name:B,type:'bar',data:vb,itemStyle:{color:COLORS.b},barMaxWidth:34}
+    ]
+  });
+}
+
+/* ---- Shifts vs previous period (git-diff style) ---- */
+function renderShifts(rt){
+  var host=el('shiftList'); if(!host) return;
+  var A=state.users[0],B=state.users[1];
+  var tot=rt.tot;
+  var pw=prevWindowTotals(), prev=pw.tot, days=pw.days;
+  var head='<div class="diff-head">'+esc(ymd(state.start))+' → '+esc(ymd(state.end))
+    +' &nbsp;vs&nbsp; '+esc(ymd(pw.start))+' → '+esc(ymd(pw.end))+' ('+days+'d each)</div>';
+  if(prev.A.msgs+prev.B.msgs===0){
+    host.innerHTML=head+'<div class="placeholder" style="height:70px">No data in the previous window — nothing to compare against</div>';
+    return;
+  }
+  function per100(c,f1,f2){return c[f2]?c[f1]/c[f2]*100:null;}
+  function lat(c){return c.resp_lat_n?c.resp_lat_sum_min/c.resp_lat_n:null;}
+  function wpm(c){return c.msgs?c.words/c.msgs:null;}
+  function nshare(c){return c.msgs?c.night_msgs/c.msgs:null;}
+  var fN=fmtNum, f1=function(v){return v.toFixed(1);},
+      fP=function(v){return fmtPct(v,1);}, fD=fmtDur;
+  function wpt(c){return c.turns?c.words/c.turns:null;}
+  function mpt(c){return c.turns?c.msgs/c.turns:null;}
+  // [label, fn(cell)->value, formatter, mode] mode: 'rel' (relative %) | 'pp' (share, point diff)
+  var defs=[
+    ['Messages',            function(c){return c.msgs;},               fN, 'rel'],
+    ['Words',               function(c){return c.words;},              fN, 'rel'],
+    ['Words / message',     wpm,                                       f1, 'rel'],
+    ['Words / turn',        wpt,                                       f1, 'rel'],
+    ['Turn length (msgs)',  mpt,                                       f1, 'rel'],
+    ['Questions / 100',     function(c){return per100(c,'questions','msgs');}, f1, 'rel'],
+    ['Emoji / 100',         function(c){return per100(c,'emoji','msgs');},     f1, 'rel'],
+    ['Reactions given',     function(c){return c.reactions_given;},    fN, 'rel'],
+    ['Reply latency',       lat,                                       fD, 'rel'],
+    ['Night share',         nshare,                                    fP, 'pp'],
+    ['Media shared',        function(c){return c.media;},              fN, 'rel'],
+    ['Photos',              function(c){return c.photos;},             fN, 'rel'],
+    ['Videos',              function(c){return c.videos;},             fN, 'rel'],
+    ['Voice notes',         function(c){return c.voice;},              fN, 'rel'],
+    ['Shares / links',      function(c){return c.shares;},             fN, 'rel'],
+    ['Initiations',         function(c){return c.initiations;},        fN, 'rel'],
+    ['Final words',         function(c){return c.endings;},            fN, 'rel'],
+    ['Re-knocks',           function(c){return c.self_restarts;},      fN, 'rel'],
+    ['Reacted & left',      function(c){return c.reacted_leave;},      fN, 'rel'],
+    ['Wait-reply speed',    function(c){return c.wait_reply_n?c.wait_reply_sum_min/c.wait_reply_n:null;}, fD, 'rel'],
+    ['Void-turn share',     function(c){return c.turns?(c.turns-c.turns_answered)/c.turns:null;}, fP, 'pp'],
+    ['We-ness',             function(c){var d=c.we_words+c.i_words;return d?c.we_words/d:null;}, fP, 'pp'],
+    ['Positivity',          function(c){var d=c.pos_words+c.neg_words;return d?c.pos_words/d:null;}, fP, 'pp'],
+    ['Gratitude',           function(c){return c.gratitude;},          fN, 'rel'],
+    ['Apologies',           function(c){return c.apology;},            fN, 'rel']
+  ];
+  var rows=[];
+  function addRow(label,cv,pv,fmt,mode){
+    if(cv==null&&pv==null) return;
+    var c=cv==null?0:cv, p=pv==null?0:pv;
+    var d,mag;
+    if(mode==='pp'){ d=c-p; if(Math.abs(d)<0.005) return; mag=(Math.abs(d)*100).toFixed(1)+'pp'; }
+    else { if(p===0&&c===0) return;
+      if(p===0){ d=1; mag='new'; } else { d=(c-p)/p; if(Math.abs(d)<0.005) return; mag=fmtPct(Math.abs(d),Math.abs(d)<0.1?1:0); } }
+    var up=d>=0;
+    rows.push({up:up,label:label,prev:pv==null?'—':fmt(p),cur:cv==null?'—':fmt(c),mag:(up?'+':'−')+mag});
+  }
+  for(var i=0;i<defs.length;i++){
+    var def=defs[i];
+    addRow(def[0]+' · '+A, def[1](tot.A), def[1](prev.A), def[2], def[3]);
+    addRow(def[0]+' · '+B, def[1](tot.B), def[1](prev.B), def[2], def[3]);
+  }
+  // couple-level rows
+  var initTot=tot.A.initiations+tot.B.initiations, pInitTot=prev.A.initiations+prev.B.initiations;
+  addRow('Initiation share · '+A,
+    initTot?tot.A.initiations/initTot:null, pInitTot?prev.A.initiations/pInitTot:null, fP, 'pp');
+  var msgsT=tot.A.msgs+tot.B.msgs, pMsgsT2=prev.A.msgs+prev.B.msgs;
+  var turnsT2=tot.A.turns+tot.B.turns, pTurnsT2=prev.A.turns+prev.B.turns;
+  addRow('Dialogue index',
+    msgsT?turnsT2/msgsT:null, pMsgsT2?pTurnsT2/pMsgsT2:null, fP, 'pp');
+  var endT2=tot.A.endings+tot.B.endings, pEndT2=prev.A.endings+prev.B.endings;
+  addRow('Final word share · '+A,
+    endT2?tot.A.endings/endT2:null, pEndT2?prev.A.endings/pEndT2:null, fP, 'pp');
+  if(!rows.length){
+    host.innerHTML=head+'<div class="placeholder" style="height:70px">No metric changed between the two windows</div>';
+    return;
+  }
+  rows.sort(function(x,y){return (y.up?1:0)-(x.up?1:0);});
+  var h=head;
+  for(var r=0;r<rows.length;r++){
+    var row=rows[r];
+    h+='<div class="drow '+(row.up?'up':'down')+'">'
+      +'<span class="sign">'+(row.up?'+':'−')+'</span>'
+      +'<span class="m">'+esc(row.label)+'</span>'
+      +'<span class="vals">'+esc(row.prev)+' → '+esc(row.cur)+'</span>'
+      +'<span class="d">'+esc(row.mag)+'</span>'
+      +'</div>';
+  }
+  host.innerHTML=h;
+}
+
 /* ---- Lifetime cards (range-independent) ---- */
 function renderLifetime(){
   var lt=state.chat.lifetime||{}, A=state.users[0], B=state.users[1];
@@ -680,11 +1289,14 @@ function renderLifetime(){
     for(var i=0;i<defs.length;i++){
       h+='<tr><td>'+esc(defs[i][0])+'</td><td class="num">'+defs[i][1](user)+'</td></tr>';
     }
+    var ex=state.chat.extras||{}; var mr=(ex.media_recip||{})[user];
+    var mrRow=(mr&&mr.media_sent)?('<tr><td>Media reciprocity</td><td class="num">'
+      +pct(mr.media_reciprocated/mr.media_sent)+' of '+fmtNum(mr.media_sent)+'</td></tr>'):'';
     var mh=(lt.circadian&&lt.circadian.overlap_coefficient!=null)?
       ('<tr><td>Circadian overlap</td><td class="num">'+pct(lt.circadian.overlap_coefficient)+'</td></tr>'):'';
     var half=(lt.half_life&&lt.half_life.median_half_life_minutes!=null)?
       ('<tr><td>Median half-life</td><td class="num">'+fmtDur(lt.half_life.median_half_life_minutes)+'</td></tr>'):'';
-    return h+mh+half+'</tbody></table>';
+    return h+mrRow+mh+half+'</tbody></table>';
   }
   el('ltCards').innerHTML =
     ltCard(A,'a',tableFor(A)) + ltCard(B,'b',tableFor(B));
@@ -717,6 +1329,47 @@ function calendarYears(){
   var ys=[]; for(var y=state.fullStart.getUTCFullYear();y<=state.fullEnd.getUTCFullYear();y++) ys.push(y);
   return ys;
 }
+
+/* ---- fast month picker ---- */
+var MONTH_NAMES=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function monthBounds(ym){ // 'YYYY-MM' -> [Date first, Date last] clamped to data
+  var y=+ym.slice(0,4), m=+ym.slice(5,7)-1;
+  var first=new Date(Date.UTC(y,m,1));
+  var last=new Date(Date.UTC(y,m+1,0));
+  return [maxD(first,state.fullStart), minD(last,state.fullEnd)];
+}
+function buildMonthPicker(){
+  var sel=el('monthSel'); if(!sel) return;
+  while(sel.options.length>1) sel.remove(1);
+  if(!state.fullStart) return;
+  var cur=new Date(Date.UTC(state.fullStart.getUTCFullYear(),state.fullStart.getUTCMonth(),1));
+  var end=new Date(Date.UTC(state.fullEnd.getUTCFullYear(),state.fullEnd.getUTCMonth(),1));
+  var opts=[];
+  while(cur.getTime()<=end.getTime()){
+    opts.push(cur.getUTCFullYear()+'-'+pad(cur.getUTCMonth()+1));
+    cur=new Date(Date.UTC(cur.getUTCFullYear(),cur.getUTCMonth()+1,1));
+  }
+  opts.reverse(); // newest first — fastest to reach
+  opts.forEach(function(ym){
+    var o=document.createElement('option');
+    o.value=ym;
+    o.textContent=MONTH_NAMES[+ym.slice(5,7)-1]+' '+ym.slice(0,4);
+    sel.appendChild(o);
+  });
+  sel.value='';
+}
+function applyMonth(ym){
+  if(!ym) return;
+  var bnd=monthBounds(ym);
+  state.start=bnd[0]; state.end=bnd[1]; state.preset=null;
+  syncControls(); renderAll();
+}
+function activeMonth(){ // 'YYYY-MM' when the active range is exactly one (clamped) month
+  var s=ymd(state.start), e=ymd(state.end);
+  if(s.slice(0,7)!==e.slice(0,7)) return '';
+  var bnd=monthBounds(s.slice(0,7));
+  return (ymd(bnd[0])===s && ymd(bnd[1])===e) ? s.slice(0,7) : '';
+}
 function applyPreset(k){
   state.preset=k;
   if(k==='all'||k==='reset'){ state.start=new Date(state.fullStart.getTime()); state.end=new Date(state.fullEnd.getTime()); if(k==='reset') state.preset='all'; }
@@ -731,6 +1384,7 @@ function maxD(a,b){return a.getTime()>b.getTime()?a:b;}
 function minD(a,b){return a.getTime()<b.getTime()?a:b;}
 function syncControls(){
   el('dFrom').value=ymd(state.start); el('dTo').value=ymd(state.end);
+  var msel=el('monthSel'); if(msel) msel.value=activeMonth();
   var chips=el('presetChips').children;
   for(var i=0;i<chips.length;i++){
     var k=chips[i].getAttribute('data-k');
@@ -742,7 +1396,9 @@ function applyCustomRange(){
   if(!f||!t) return;
   var fs=parseYMD(f), ts=parseYMD(t);
   if(fs.getTime()>ts.getTime()){ var tmp=fs; fs=ts; ts=tmp; }
-  state.start=maxD(fs,state.fullStart); state.end=minD(ts,state.fullEnd);
+  // clamp INTO the data extent so an out-of-data range can never invert
+  state.start=minD(maxD(fs,state.fullStart),state.fullEnd);
+  state.end=maxD(minD(ts,state.fullEnd),state.fullStart);
   state.preset=null; syncControls(); renderAll();
 }
 
@@ -790,12 +1446,13 @@ function onChatLoaded(id){
   state.start=new Date(state.fullStart.getTime()); state.end=new Date(state.fullEnd.getTime());
   state.preset='all';
   renderSkeleton();
-  buildPresets(); syncControls();
+  buildPresets(); buildMonthPicker(); syncControls();
   if(!dates.length){ el('app').querySelectorAll('.chart').forEach(function(n){n.innerHTML='<div class="placeholder">No data in this chat</div>';});
     el('kpiRow').innerHTML='<div class="kpi"><div class="placeholder">No data</div></div>';
     el('ltCards').innerHTML=''; return; }
   renderAll();
   renderLifetime();
+  safe(renderTurnHist,'turnhist');
 }
 
 /* ---------- init ---------- */
@@ -807,6 +1464,7 @@ function init(){
   document.addEventListener('click',function(e){
     if(!el('chatDD').contains(e.target)) closeDD(); });
   el('gran').onchange=function(){ state.gran=this.value; if(state.chat) renderAll(); };
+  el('monthSel').onchange=function(){ if(state.chat) applyMonth(this.value); };
   el('applyRange').onclick=applyCustomRange;
   el('dFrom').onchange=function(){}; el('dTo').onchange=function(){};
   buildChatDropdown('');

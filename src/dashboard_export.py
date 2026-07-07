@@ -41,6 +41,75 @@ _SCRIPT_RE = re.compile(r'</script', re.IGNORECASE)
 
 
 # --------------------------------------------------------------------------- #
+# Psycholinguistic lexicons (EN + Georgian + common romanized Georgian).
+# Single-token entries only; tokens are lowercased and punctuation-stripped
+# before lookup. These are deliberately small, high-precision lists — the
+# metrics they feed (we-ness, positivity balance, courtesy) are rate-based,
+# so precision matters more than recall.
+# --------------------------------------------------------------------------- #
+
+LEX_WE = {'we', 'us', 'our', 'ours', 'ourselves',
+          'ჩვენ', 'ჩვენი', 'ჩვენს', 'ჩვენც', 'ჩვენთვის', 'ჩვენთან', 'ერთად',
+          'chven', 'chveni', 'ertad'}
+LEX_I = {'i', 'me', 'my', 'mine', 'myself', 'im', "i'm",
+         'მე', 'ჩემი', 'ჩემს', 'ჩემთვის', 'ჩემთან', 'მეც', 'me', 'chemi'}
+LEX_YOU = {'you', 'your', 'yours', 'yourself', 'u', 'ur',
+           'შენ', 'შენი', 'შენს', 'შენც', 'შენთვის', 'შენთან', 'shen', 'sheni'}
+LEX_POS = {'love', 'loved', 'great', 'awesome', 'amazing', 'happy', 'glad',
+           'beautiful', 'cute', 'sweet', 'perfect', 'wonderful', 'nice',
+           'best', 'excited', 'fun', 'funny', 'cool', 'lovely', 'adorable',
+           'enjoy', 'proud', 'yay', 'wow',
+           'მიყვარხარ', 'კარგი', 'კარგია', 'მაგარი', 'მაგარია', 'სუპერ',
+           'საყვარელი', 'ლამაზი', 'ლამაზო', 'ბედნიერი', 'სიყვარული',
+           'მომწონს', 'მიხარია', 'მშვენიერი', 'ჯიგარი', 'საოცარია',
+           'გემრიელი', 'სასწაულია',
+           'magaria', 'kargia', 'mikvarxar', 'miyvarxar', 'lamazi'}
+LEX_NEG = {'hate', 'sad', 'angry', 'mad', 'annoyed', 'annoying', 'awful',
+           'terrible', 'horrible', 'worst', 'cry', 'crying', 'upset',
+           'scared', 'afraid', 'anxious', 'stress', 'stressed', 'hurt',
+           'pain', 'lonely', 'sick', 'depressed', 'ugh',
+           'ცუდი', 'ცუდია', 'ცუდად', 'საშინელი', 'საშინელება', 'მეზიზღება',
+           'მძულს', 'ბრაზი', 'გავბრაზდი', 'ვნერვიულობ', 'ნერვები', 'სევდა',
+           'მოწყენილი', 'ვტირი', 'ტირილი', 'პრობლემა', 'ჩხუბი', 'დაღლილი',
+           'მეშინია', 'შემეშინდა', 'ცუდადაა',
+           'cudi', 'cudad', 'problema'}
+LEX_GRATITUDE = {'thanks', 'thank', 'thx', 'ty', 'thankyou',
+                 'მადლობა', 'მადლობთ', 'მადლობები', 'მერსი',
+                 'madloba', 'mersi'}
+LEX_APOLOGY = {'sorry', 'apologies', 'apologize', 'sry',
+               'ბოდიში', 'ბოდიშით', 'უკაცრავად', 'მაპატიე', 'მაპატიო',
+               'bodishi', 'mapatie', 'ukacravad'}
+
+# Simplified Language-Style-Matching categories (function words; Ireland &
+# Pennebaker). Matching on function words — not content — is what makes LSM a
+# rapport measure rather than a topic-overlap measure.
+LSM_CATEGORIES = {
+    'pronouns': LEX_I | LEX_YOU | LEX_WE | {'he', 'she', 'it', 'they', 'them',
+        'his', 'her', 'their', 'ის', 'იმან', 'მან', 'ისინი', 'მისი', 'მათი'},
+    'conjunctions': {'and', 'but', 'or', 'so', 'because', 'if', 'then',
+        'და', 'მაგრამ', 'მარა', 'თუ', 'რომ', 'იმიტომ', 'იმიტორო', 'ანუ', 'თორე'},
+    'negations': {'not', 'no', 'never', 'dont', "don't", 'cant', "can't",
+        'wont', "won't", 'არ', 'არა', 'ვერ', 'ნუ', 'არც', 'ara', 'ar'},
+    'questions': {'what', 'how', 'why', 'when', 'where', 'who',
+        'რა', 'როგორ', 'რატომ', 'როდის', 'სად', 'ვინ', 'ra', 'rogor', 'ratom'},
+    'affirmations': {'yes', 'yeah', 'yep', 'ok', 'okay', 'sure',
+        'კი', 'ხო', 'კაი', 'ოკ', 'ჰო', 'აჰა', 'ki', 'xo', 'kai', 'ho', 'aha'},
+}
+
+_TOKEN_CLEAN = re.compile(r'[^\wႠ-ჿ]')
+
+
+def _tokens(content: str) -> List[str]:
+    """Lowercased, punctuation-stripped tokens (empty strings dropped)."""
+    out = []
+    for raw in content.lower().split():
+        t = _TOKEN_CLEAN.sub('', raw)
+        if t:
+            out.append(t)
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Daily aggregate table
 # --------------------------------------------------------------------------- #
 
@@ -48,8 +117,30 @@ def _blank_day() -> Dict[str, Any]:
     return {
         'msgs': 0, 'words': 0, 'chars': 0, 'emoji': 0, 'questions': 0,
         'night_msgs': 0, 'reactions_given': 0, 'reactions_received': 0,
-        'media': 0, 'hours': [0] * 24,
+        'media': 0, 'photos': 0, 'videos': 0, 'voice': 0, 'shares': 0,
+        'hours': [0] * 24,
         'resp_lat_sum_min': 0.0, 'resp_lat_n': 0, 'initiations': 0,
+        # "turns": consecutive-message runs started this day. A turn ends when
+        # the OTHER person interjects or a session gap passes. msgs/turns =
+        # average monologue length; words/turns = words per complete thought.
+        'turns': 0,
+        # turns that got a partner follow-up within the session (the rest
+        # "talked into the void" — they ended the session unanswered)
+        'turns_answered': 0,
+        # session-ending dynamics
+        'endings': 0,        # sessions where this user had the final word
+        'self_restarts': 0,  # opened a session although THEIR last message was
+                             # the one that ended the previous session (re-knock
+                             # without ever getting a reply)
+        'reacted_leave': 0,  # reacted to the partner's session-final message
+                             # instead of replying ("left on reacted")
+        # waiting eagerness: after >=1h of waiting for a reply, how fast this
+        # user answers once the partner's reply finally lands
+        'wait_reply_sum_min': 0.0, 'wait_reply_n': 0,
+        # psycholinguistic lexicon counters (token matches)
+        'we_words': 0, 'i_words': 0, 'you_words': 0,
+        'pos_words': 0, 'neg_words': 0,
+        'gratitude': 0, 'apology': 0,
     }
 
 
@@ -116,6 +207,14 @@ def build_daily_aggregates(messages: List[Dict[str, Any]],
         c['words'] += len(content.split())
         c['chars'] += len(content)
         c['emoji'] += len(EMOJI_PATTERN.findall(content))
+        for t in _tokens(content):
+            if t in LEX_WE: c['we_words'] += 1
+            elif t in LEX_I: c['i_words'] += 1
+            elif t in LEX_YOU: c['you_words'] += 1
+            if t in LEX_POS: c['pos_words'] += 1
+            elif t in LEX_NEG: c['neg_words'] += 1
+            if t in LEX_GRATITUDE: c['gratitude'] += 1
+            elif t in LEX_APOLOGY: c['apology'] += 1
         if _is_question(m):
             c['questions'] += 1
         if dt.hour in NIGHT_HOURS:
@@ -135,18 +234,73 @@ def build_daily_aggregates(messages: List[Dict[str, Any]],
                 cell(date, receiver)['reactions_received'] += 1
         media = _media_count(m)
         if media and receiver in user_set:
-            cell(date, receiver)['media'] += media
+            c = cell(date, receiver)
+            c['media'] += media
+            # per-kind breakdown
+            for field, key in (('photos', 'photos'), ('videos', 'videos'),
+                               ('audio_files', 'voice')):
+                val = m.get(field)
+                if isinstance(val, list):
+                    c[key] += len(val)
+                elif val:
+                    c[key] += 1
+            if m.get('share'):
+                c['shares'] += 1
 
     # --- Session-derived channels (initiations + reply latency) ------------ #
     real = [m for m in messages
             if is_real_message(m) and m.get('sender_name') in user_set]
     real.sort(key=lambda m: m.get('timestamp_ms', 0))
-    for session in _split_sessions(real):
+    def _day(msg):
+        return to_datetime(msg.get('timestamp_ms', 0), timezone).strftime('%Y-%m-%d')
+
+    sessions = _split_sessions(real)
+    for si, session in enumerate(sessions):
         opener = session[0]
         o_sender = opener.get('sender_name', 'Unknown')
         if o_sender in user_set:
-            o_date = to_datetime(opener.get('timestamp_ms', 0), timezone).strftime('%Y-%m-%d')
-            cell(o_date, o_sender)['initiations'] += 1
+            cell(_day(opener), o_sender)['initiations'] += 1
+
+        # Turns: a new run starts at the session opening and on every speaker
+        # change; attributed to the day of its first message. Every turn except
+        # the session's last one was followed by the partner (= answered).
+        run_starts = []  # (sender, first_msg)
+        prev_sender = None
+        for msg in session:
+            sender = msg.get('sender_name', 'Unknown')
+            if sender != prev_sender:
+                run_starts.append((sender, msg))
+                prev_sender = sender
+        for ri, (sender, first_msg) in enumerate(run_starts):
+            if sender not in user_set:
+                continue
+            c = cell(_day(first_msg), sender)
+            c['turns'] += 1
+            if ri < len(run_starts) - 1:
+                c['turns_answered'] += 1
+
+        # Endings: the final-word holder of this session.
+        last = session[-1]
+        l_sender = last.get('sender_name', 'Unknown')
+        if l_sender in user_set:
+            cell(_day(last), l_sender)['endings'] += 1
+
+        # "Left on reacted": the partner reacted to the session-final message
+        # instead of replying with text.
+        for r in (last.get('reactions') or []):
+            actor = decode_georgian_text(r.get('actor', '') or '')
+            if actor in user_set and actor != l_sender:
+                cell(_day(last), actor)['reacted_leave'] += 1
+
+        # Self-restart (re-knock): this session's opener also had the final
+        # word of the PREVIOUS session — they restarted without ever getting
+        # a reply.
+        if si > 0:
+            prev_last = sessions[si - 1][-1].get('sender_name', 'Unknown')
+            if o_sender in user_set and o_sender == prev_last:
+                cell(_day(opener), o_sender)['self_restarts'] += 1
+
+        # In-session reply latency.
         for k in range(1, len(session)):
             cur, prev = session[k], session[k - 1]
             if cur.get('sender_name') == prev.get('sender_name'):
@@ -156,10 +310,30 @@ def build_daily_aggregates(messages: List[Dict[str, Any]],
                 continue
             replier = cur.get('sender_name', 'Unknown')
             if replier in user_set:
-                r_date = to_datetime(cur.get('timestamp_ms', 0), timezone).strftime('%Y-%m-%d')
-                c = cell(r_date, replier)
+                c = cell(_day(cur), replier)
                 c['resp_lat_sum_min'] += gap_ms / 60000.0
                 c['resp_lat_n'] += 1
+
+    # --- Waiting eagerness (cross-session aware) ---------------------------- #
+    # X sent a message, the partner's reply took >= 1h; how fast does X answer
+    # that long-awaited reply? (Only follow-ups within a session gap count —
+    # if X also vanished, nobody was waiting.)
+    WAIT_MS = 60 * 60 * 1000
+    for i in range(1, len(real) - 1):
+        prev_m, cur_m, nxt_m = real[i - 1], real[i], real[i + 1]
+        waiter = prev_m.get('sender_name', 'Unknown')
+        if cur_m.get('sender_name') == waiter or nxt_m.get('sender_name') != waiter:
+            continue
+        wait_gap = cur_m.get('timestamp_ms', 0) - prev_m.get('timestamp_ms', 0)
+        if wait_gap < WAIT_MS:
+            continue
+        follow = nxt_m.get('timestamp_ms', 0) - cur_m.get('timestamp_ms', 0)
+        if follow < 0 or follow > SESSION_GAP_MS:
+            continue
+        if waiter in user_set:
+            c = cell(_day(nxt_m), waiter)
+            c['wait_reply_sum_min'] += follow / 60000.0
+            c['wait_reply_n'] += 1
 
     # Round latency sums and freeze ordinary dicts.
     out: Dict[str, Dict[str, Dict[str, Any]]] = {}
@@ -167,8 +341,174 @@ def build_daily_aggregates(messages: List[Dict[str, Any]],
         out[date] = {}
         for user, c in daily[date].items():
             c['resp_lat_sum_min'] = round(c['resp_lat_sum_min'], 2)
+            c['wait_reply_sum_min'] = round(c['wait_reply_sum_min'], 2)
             out[date][user] = c
     return out
+
+
+# --------------------------------------------------------------------------- #
+# All-time extras: turn histogram, media reciprocity, basic NLP
+# --------------------------------------------------------------------------- #
+
+# Single-emoji matcher (EMOJI_PATTERN matches runs); modifiers excluded so a
+# skin-toned emoji counts as its base glyph.
+_EMOJI_ONE = re.compile(
+    '[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E0-\U0001F1FF\U00002764]'
+)
+_EMOJI_SKIP = set('\U0000FE0F\U0001F3FB\U0001F3FC\U0001F3FD\U0001F3FE\U0001F3FF')
+
+MEDIA_RECIP_WINDOW_MS = 30 * 60 * 1000
+
+
+def build_extras(messages: List[Dict[str, Any]],
+                 participants: List[str],
+                 timezone: str = DEFAULT_TIMEZONE) -> Dict[str, Any]:
+    """All-time per-user extras: turn-length histogram, media reciprocity and
+    a basic-NLP block (top emojis / words / distinctive vocabulary)."""
+    from src.word_frequency import extract_words
+
+    user_set = set(participants)
+    real = [m for m in messages
+            if is_real_message(m) and m.get('sender_name') in user_set]
+    real.sort(key=lambda m: m.get('timestamp_ms', 0))
+
+    # ---- turn-length histogram (1..9, '10+') ------------------------------- #
+    turn_hist: Dict[str, Counter] = {u: Counter() for u in participants}
+    for session in _split_sessions(real):
+        run_sender, run_len = None, 0
+        for msg in session + [None]:
+            sender = msg.get('sender_name') if msg else None
+            if sender == run_sender:
+                run_len += 1
+                continue
+            if run_sender in user_set and run_len:
+                key = '10+' if run_len >= 10 else str(run_len)
+                turn_hist[run_sender][key] += 1
+            run_sender, run_len = sender, 1
+
+    # ---- media reciprocity -------------------------------------------------- #
+    media_all = [m for m in messages if m.get('sender_name') in user_set]
+    media_all.sort(key=lambda m: m.get('timestamp_ms', 0))
+    recip = {u: {'media_sent': 0, 'media_reciprocated': 0} for u in participants}
+    media_idx = [i for i, m in enumerate(media_all) if _media_count(m)]
+    for pos, i in enumerate(media_idx):
+        m = media_all[i]
+        sender = m.get('sender_name')
+        recip[sender]['media_sent'] += 1
+        ts = m.get('timestamp_ms', 0)
+        for j in media_idx[pos + 1:]:
+            m2 = media_all[j]
+            gap = m2.get('timestamp_ms', 0) - ts
+            if gap > MEDIA_RECIP_WINDOW_MS:
+                break
+            if m2.get('sender_name') != sender:
+                recip[sender]['media_reciprocated'] += 1
+                break
+
+    # ---- basic NLP ----------------------------------------------------------#
+    words: Dict[str, Counter] = {u: Counter() for u in participants}
+    emojis: Dict[str, Counter] = {u: Counter() for u in participants}
+    word_totals = {u: 0 for u in participants}
+    # monthly blocks (client merges the months inside the active range so the
+    # Language section follows the global time filter)
+    m_words: Dict[str, Dict[str, Counter]] = defaultdict(lambda: {u: Counter() for u in participants})
+    m_emojis: Dict[str, Dict[str, Counter]] = defaultdict(lambda: {u: Counter() for u in participants})
+    m_uniq_total: Dict[str, Dict[str, List[int]]] = defaultdict(lambda: {u: [0, 0] for u in participants})
+    m_lsm_counts: Dict[str, Dict[str, Dict[str, int]]] = defaultdict(
+        lambda: {u: {cat: 0 for cat in LSM_CATEGORIES} for u in participants})
+    m_lsm_tokens: Dict[str, Dict[str, int]] = defaultdict(lambda: {u: 0 for u in participants})
+
+    for m in real:
+        u = m.get('sender_name')
+        content = m.get('content', '') or ''
+        month = to_datetime(m.get('timestamp_ms', 0), timezone).strftime('%Y-%m')
+        ws = extract_words(content)
+        words[u].update(ws)
+        m_words[month][u].update(ws)
+        word_totals[u] += len(content.split())
+        for ch in _EMOJI_ONE.findall(content):
+            if ch not in _EMOJI_SKIP:
+                emojis[u][ch] += 1
+                m_emojis[month][u][ch] += 1
+        toks = _tokens(content)
+        m_lsm_tokens[month][u] += len(toks)
+        for t in toks:
+            for cat, lex in LSM_CATEGORIES.items():
+                if t in lex:
+                    m_lsm_counts[month][u][cat] += 1
+
+    # per-month vocabulary richness (TTR is only meaningful within a window)
+    for month, per_u in m_words.items():
+        for u in participants:
+            cnt = per_u[u]
+            m_uniq_total[month][u] = [len(cnt), sum(cnt.values())]
+
+    # ---- monthly LSM (Language Style Matching, simplified) ----------------- #
+    MIN_LSM_TOKENS = 150  # both people need real volume for LSM to mean anything
+    lsm_monthly: Dict[str, Optional[float]] = {}
+    if len(participants) >= 2:
+        pa, pb = participants[0], participants[1]
+        for month in sorted(m_lsm_tokens):
+            ta, tb = m_lsm_tokens[month][pa], m_lsm_tokens[month][pb]
+            if ta < MIN_LSM_TOKENS or tb < MIN_LSM_TOKENS:
+                lsm_monthly[month] = None
+                continue
+            sims = []
+            for cat in LSM_CATEGORIES:
+                ra = m_lsm_counts[month][pa][cat] / ta
+                rb = m_lsm_counts[month][pb][cat] / tb
+                sims.append(1 - abs(ra - rb) / (ra + rb + 1e-4))
+            lsm_monthly[month] = round(sum(sims) / len(sims), 4)
+
+    # distinctive vocabulary: log-odds with +1 smoothing, min combined count 5
+    import math
+    nlp = {}
+    a = participants[0]
+    b = participants[1] if len(participants) > 1 else None
+    tot_a = sum(words[a].values()) or 1
+    tot_b = (sum(words[b].values()) or 1) if b else 1
+    for u, other, tu, to in ((a, b, tot_a, tot_b), (b, a, tot_b, tot_a)):
+        if u is None:
+            continue
+        distinctive = []
+        if other is not None:
+            for w, cu in words[u].items():
+                co = words[other].get(w, 0)
+                if cu + co < 5:
+                    continue
+                score = math.log((cu + 1) / (tu - cu + 1)) - math.log((co + 1) / (to - co + 1))
+                if score > 0:
+                    distinctive.append((w, round(score, 3), cu))
+            distinctive.sort(key=lambda x: -x[1])
+        uniq = len(words[u])
+        total_w = sum(words[u].values())
+        nlp[u] = {
+            'top_words': words[u].most_common(25),
+            'top_emojis': emojis[u].most_common(15),
+            'distinctive': [[w, c] for w, _, c in distinctive[:12]],
+            'unique_words': uniq,
+            'total_words': word_totals[u],
+            'ttr': round(uniq / total_w, 4) if total_w else 0.0,
+        }
+
+    nlp_monthly = {}
+    for month in sorted(m_words):
+        nlp_monthly[month] = {}
+        for u in participants:
+            nlp_monthly[month][u] = {
+                'words': m_words[month][u].most_common(60),
+                'emojis': m_emojis[month][u].most_common(20),
+                'uniq': m_uniq_total[month][u][0],
+                'total': m_uniq_total[month][u][1],
+            }
+
+    return {
+        'turn_hist': {u: dict(turn_hist[u]) for u in participants},
+        'media_recip': recip,
+        'nlp': nlp,
+        'nlp_monthly': nlp_monthly,
+        'lsm_monthly': lsm_monthly,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -244,6 +584,7 @@ def build_chat_payload(name: str,
         'daily': daily,
         'change_points': _change_points(analysis),
         'lifetime': build_lifetime(analysis),
+        'extras': build_extras(messages, participants, timezone),
     }
 
 
