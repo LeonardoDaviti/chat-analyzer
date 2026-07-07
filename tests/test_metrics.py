@@ -54,30 +54,30 @@ def make_msg(sender, offset_minutes, content="", photos=0, videos=0):
 # ============================================================
 
 class TestMessageCounts:
-    """Test: David sends 3, Mariam sends 7."""
+    """Test: Alice sends 3, Bob sends 7."""
 
     def test_basic_counts(self):
         data = {
-            "participants": [{"name": "David"}, {"name": "Mariam"}],
+            "participants": [{"name": "Alice"}, {"name": "Bob"}],
             "title": "Test",
             "messages": [
-                make_msg("David", 0, "hello"),
-                make_msg("Mariam", 1, "hi"),
-                make_msg("David", 2, "hey"),
-                make_msg("Mariam", 3, "hello again"),
-                make_msg("Mariam", 4, "yes"),
-                make_msg("David", 5, "ok"),
-                make_msg("Mariam", 6, "sure"),
-                make_msg("Mariam", 7, "bye"),
-                make_msg("Mariam", 8, "see you"),
-                make_msg("Mariam", 9, "later"),
+                make_msg("Alice", 0, "hello"),
+                make_msg("Bob", 1, "hi"),
+                make_msg("Alice", 2, "hey"),
+                make_msg("Bob", 3, "hello again"),
+                make_msg("Bob", 4, "yes"),
+                make_msg("Alice", 5, "ok"),
+                make_msg("Bob", 6, "sure"),
+                make_msg("Bob", 7, "bye"),
+                make_msg("Bob", 8, "see you"),
+                make_msg("Bob", 9, "later"),
             ],
         }
-        analyzer = ChatAnalyzer(data, "David")
+        analyzer = ChatAnalyzer(data, "Alice")
         result = analyzer._get_message_counts()
 
-        assert result["David"] == 3, f"Expected David=3, got {result['David']}"
-        assert result["Mariam"] == 7, f"Expected Mariam=7, got {result['Mariam']}"
+        assert result["Alice"] == 3, f"Expected Alice=3, got {result['Alice']}"
+        assert result["Bob"] == 7, f"Expected Bob=7, got {result['Bob']}"
 
 
 class TestLanguageDistribution:
@@ -85,8 +85,8 @@ class TestLanguageDistribution:
 
     def test_english_only(self):
         msgs = [
-            make_msg("David", 0, "hello world"),
-            make_msg("Mariam", 1, "how are you"),
+            make_msg("Alice", 0, "hello world"),
+            make_msg("Bob", 1, "how are you"),
         ]
         result = get_language_distribution(msgs)
         assert "english" in result
@@ -96,8 +96,8 @@ class TestLanguageDistribution:
         # Single detector (normalizer.detect_language) on decoded Georgian text.
         # (The old undecoded 'a-accent' heuristic detector was removed - A3.)
         msgs = [
-            make_msg("David", 0, "როგორ ხარ"),
-            make_msg("Mariam", 1, "კარგად ვარ"),
+            make_msg("Alice", 0, "როგორ ხარ"),
+            make_msg("Bob", 1, "კარგად ვარ"),
         ]
         result = get_language_distribution(msgs)
         assert "georgian" in result
@@ -106,9 +106,9 @@ class TestLanguageDistribution:
     def test_language_field_is_aggregated(self):
         # Aggregates the normalizer's per-message `language` field directly.
         msgs = [
-            {"sender_name": "David", "content": "hi", "language": "english"},
-            {"sender_name": "David", "content": "x", "language": "georgian"},
-            {"sender_name": "David", "content": "y", "language": "system"},
+            {"sender_name": "Alice", "content": "hi", "language": "english"},
+            {"sender_name": "Alice", "content": "x", "language": "georgian"},
+            {"sender_name": "Alice", "content": "y", "language": "system"},
         ]
         result = get_language_distribution(msgs)
         assert result["english"] == 50.0
@@ -123,20 +123,20 @@ class TestWordFrequency:
         # word_frequency stopword and is (correctly) filtered. Use non-stopword
         # content words to exercise the counting mechanics.
         msgs = [
-            make_msg("David", 0, "apple apple banana"),
-            make_msg("David", 1, "apple cherry"),
-            make_msg("Mariam", 2, "banana banana banana"),
+            make_msg("Alice", 0, "apple apple banana"),
+            make_msg("Alice", 1, "apple cherry"),
+            make_msg("Bob", 2, "banana banana banana"),
         ]
-        result = get_word_frequency(msgs, "David")
+        result = get_word_frequency(msgs, "Alice")
         assert result["apple"] == 3
         assert result["banana"] == 1
 
     def test_empty_messages(self):
         msgs = [
-            make_msg("David", 0, ""),
-            make_msg("David", 1, "Liked a message"),
+            make_msg("Alice", 0, ""),
+            make_msg("Alice", 1, "Liked a message"),
         ]
-        result = get_word_frequency(msgs, "David")
+        result = get_word_frequency(msgs, "Alice")
         assert result == {}
 
 
@@ -145,26 +145,26 @@ class TestResponseTimes:
 
     def test_basic_response_times(self):
         msgs = [
-            make_msg("David", 0, "hi"),
-            make_msg("Mariam", 5, "hello"),     # Mariam responds in 5 min
-            make_msg("David", 10, "hey"),       # David responds in 5 min
-            make_msg("Mariam", 12, "hi again"), # Mariam responds in 2 min
+            make_msg("Alice", 0, "hi"),
+            make_msg("Bob", 5, "hello"),     # Bob responds in 5 min
+            make_msg("Alice", 10, "hey"),       # Alice responds in 5 min
+            make_msg("Bob", 12, "hi again"), # Bob responds in 2 min
         ]
-        result = calculate_response_times(msgs, "David")
+        result = calculate_response_times(msgs, "Alice")
 
         assert result["my_avg_response_minutes"] == 5.0, \
-            f"David avg should be 5.0, got {result['my_avg_response_minutes']}"
+            f"Alice avg should be 5.0, got {result['my_avg_response_minutes']}"
         assert result["partner_avg_response_minutes"] == 3.5, \
-            f"Mariam avg should be 3.5, got {result['partner_avg_response_minutes']}"
+            f"Bob avg should be 3.5, got {result['partner_avg_response_minutes']}"
 
     def test_who_delays_more(self):
         msgs = [
-            make_msg("David", 0, "hi"),
-            make_msg("Mariam", 2, "hello"),     # Mariam: 2 min
-            make_msg("David", 30, "hey"),       # David: 28 min
-            make_msg("Mariam", 32, "hi"),       # Mariam: 2 min
+            make_msg("Alice", 0, "hi"),
+            make_msg("Bob", 2, "hello"),     # Bob: 2 min
+            make_msg("Alice", 30, "hey"),       # Alice: 28 min
+            make_msg("Bob", 32, "hi"),       # Bob: 2 min
         ]
-        result = calculate_response_times(msgs, "David")
+        result = calculate_response_times(msgs, "Alice")
         assert result["who_delays_more"] == "you"
 
 
@@ -173,14 +173,14 @@ class TestMediaStats:
 
     def test_photo_count(self):
         msgs = [
-            make_msg("David", 0, "", photos=2),
-            make_msg("Mariam", 1, "", photos=1),
-            make_msg("David", 2, "no media"),
+            make_msg("Alice", 0, "", photos=2),
+            make_msg("Bob", 1, "", photos=1),
+            make_msg("Alice", 2, "no media"),
         ]
         result = get_media_stats(msgs)
         assert result["totals"]["photos"] == 3
-        assert result["by_sender"]["David"]["photos"] == 2
-        assert result["by_sender"]["Mariam"]["photos"] == 1
+        assert result["by_sender"]["Alice"]["photos"] == 2
+        assert result["by_sender"]["Bob"]["photos"] == 1
 
 
 # ============================================================
@@ -192,22 +192,22 @@ class TestExpressiveLengthening:
 
     def test_elongated_words(self):
         msgs = [
-            make_msg("David", 0, "heyyy noooo yessss"),
-            make_msg("David", 1, "ok"),
-            make_msg("Mariam", 2, "hello world"),
+            make_msg("Alice", 0, "heyyy noooo yessss"),
+            make_msg("Alice", 1, "ok"),
+            make_msg("Bob", 2, "hello world"),
         ]
-        result = expressive_lengthening_index(msgs, ["David", "Mariam"])
-        assert result["David"] > 0, "David should have elongated words"
-        assert result["Mariam"] == 0.0, "Mariam should have no elongated words"
+        result = expressive_lengthening_index(msgs, ["Alice", "Bob"])
+        assert result["Alice"] > 0, "Alice should have elongated words"
+        assert result["Bob"] == 0.0, "Bob should have no elongated words"
 
     def test_no_elongated(self):
         msgs = [
-            make_msg("David", 0, "hello world"),
-            make_msg("Mariam", 1, "how are you"),
+            make_msg("Alice", 0, "hello world"),
+            make_msg("Bob", 1, "how are you"),
         ]
-        result = expressive_lengthening_index(msgs, ["David", "Mariam"])
-        assert result["David"] == 0.0
-        assert result["Mariam"] == 0.0
+        result = expressive_lengthening_index(msgs, ["Alice", "Bob"])
+        assert result["Alice"] == 0.0
+        assert result["Bob"] == 0.0
 
 
 class TestEmotionalCoolingAlert:
@@ -218,10 +218,10 @@ class TestEmotionalCoolingAlert:
         msgs = []
         for day in range(30):
             msgs.append(make_msg(
-                "David", day * 60,
+                "Alice", day * 60,
                 content="heyyy noooo yessss" * 5  # High expressiveness every day
             ))
-        result = emotional_cooling_alert(msgs, ["David"])
+        result = emotional_cooling_alert(msgs, ["Alice"])
         # Should have few or no alerts since expressiveness is stable
         assert "total_cold_shifts" in result
 
@@ -229,10 +229,10 @@ class TestEmotionalCoolingAlert:
         msgs = []
         for day in range(30):
             if day < 15:
-                msgs.append(make_msg("David", day * 60, "heyyy"))  # High expressiveness
+                msgs.append(make_msg("Alice", day * 60, "heyyy"))  # High expressiveness
             else:
-                msgs.append(make_msg("David", day * 60, "ok"))     # Low expressiveness
-        result = emotional_cooling_alert(msgs, ["David"])
+                msgs.append(make_msg("Alice", day * 60, "ok"))     # Low expressiveness
+        result = emotional_cooling_alert(msgs, ["Alice"])
         assert "alerts" in result or "total_cold_shifts" in result
 
 
@@ -241,18 +241,18 @@ class TestFinalWordDominance:
 
     def test_dominant_ender(self):
         msgs = [
-            make_msg("David", 0, "hi"),
-            make_msg("Mariam", 1, "hello"),
-            make_msg("David", 2, "how are you"),
-            make_msg("Mariam", 3, "good"),
+            make_msg("Alice", 0, "hi"),
+            make_msg("Bob", 1, "hello"),
+            make_msg("Alice", 2, "how are you"),
+            make_msg("Bob", 3, "good"),
             # Gap > 4h (simulated by large time jump)
-            make_msg("David", 500, "hey"),
-            make_msg("Mariam", 501, "hi"),
-            make_msg("David", 502, "last word"),  # David ends this session
+            make_msg("Alice", 500, "hey"),
+            make_msg("Bob", 501, "hi"),
+            make_msg("Alice", 502, "last word"),  # Alice ends this session
         ]
-        result = final_word_dominance(msgs, ["David", "Mariam"])
-        assert "David" in result
-        assert "Mariam" in result
+        result = final_word_dominance(msgs, ["Alice", "Bob"])
+        assert "Alice" in result
+        assert "Bob" in result
         total = sum(result.values())
         assert total > 0, "Should have at least one session"
 
@@ -263,25 +263,25 @@ class TestThoughtFragmentation:
     def test_fragmented_sender(self):
         base = datetime(2025, 1, 1, 12, 0, 0)
         msgs = [
-            # David rapid fires (3 messages within 15 seconds)
-            make_msg("David", 0, "msg1"),
-            make_msg("David", 0.1, "msg2"),
-            make_msg("David", 0.2, "msg3"),
+            # Alice rapid fires (3 messages within 15 seconds)
+            make_msg("Alice", 0, "msg1"),
+            make_msg("Alice", 0.1, "msg2"),
+            make_msg("Alice", 0.2, "msg3"),
             # Normal conversation
-            make_msg("Mariam", 10, "slow reply"),
+            make_msg("Bob", 10, "slow reply"),
         ]
-        result = thought_fragmentation_index(msgs, ["David", "Mariam"])
-        assert "David" in result
-        assert result["David"] >= 0
+        result = thought_fragmentation_index(msgs, ["Alice", "Bob"])
+        assert "Alice" in result
+        assert result["Alice"] >= 0
 
     def test_no_fragmentation(self):
         msgs = [
-            make_msg("David", 0, "hello"),
-            make_msg("Mariam", 30, "hi"),
-            make_msg("David", 60, "hey"),
+            make_msg("Alice", 0, "hello"),
+            make_msg("Bob", 30, "hi"),
+            make_msg("Alice", 60, "hey"),
         ]
-        result = thought_fragmentation_index(msgs, ["David", "Mariam"])
-        assert result["David"] == 0.0
+        result = thought_fragmentation_index(msgs, ["Alice", "Bob"])
+        assert result["Alice"] == 0.0
 
 
 class TestConversationalEntropy:
@@ -289,22 +289,22 @@ class TestConversationalEntropy:
 
     def test_returns_per_month(self):
         msgs = [
-            make_msg("David", 0, "hello world how are you"),
-            make_msg("David", 1, "i am fine thanks"),
-            make_msg("Mariam", 2, "good to hear"),
+            make_msg("Alice", 0, "hello world how are you"),
+            make_msg("Alice", 1, "i am fine thanks"),
+            make_msg("Bob", 2, "good to hear"),
         ]
-        result = conversational_entropy(msgs, ["David", "Mariam"])
+        result = conversational_entropy(msgs, ["Alice", "Bob"])
         assert isinstance(result, dict)
         # Should have at least one month key
         assert len(result) > 0
 
     def test_english_only(self):
         msgs = [
-            make_msg("David", 0, "the quick brown fox jumps over the lazy dog"),
-            make_msg("David", 1, "the cat sat on the mat"),
+            make_msg("Alice", 0, "the quick brown fox jumps over the lazy dog"),
+            make_msg("Alice", 1, "the cat sat on the mat"),
         ]
-        result = conversational_entropy(msgs, ["David"])
-        assert "David" in result[list(result.keys())[0]]
+        result = conversational_entropy(msgs, ["Alice"])
+        assert "Alice" in result[list(result.keys())[0]]
 
 
 class TestDefensivenessIndex:
@@ -312,21 +312,21 @@ class TestDefensivenessIndex:
 
     def test_defensive_words(self):
         msgs = [
-            make_msg("David", 0, "I but just technically actually"),
-            make_msg("David", 1, "hello"),
-            make_msg("Mariam", 2, "hi there"),
+            make_msg("Alice", 0, "I but just technically actually"),
+            make_msg("Alice", 1, "hello"),
+            make_msg("Bob", 2, "hi there"),
         ]
-        result = defensiveness_index(msgs, ["David", "Mariam"])
-        assert result["David"] > result["Mariam"], \
-            f"David should be more defensive: David={result['David']}, Mariam={result['Mariam']}"
+        result = defensiveness_index(msgs, ["Alice", "Bob"])
+        assert result["Alice"] > result["Bob"], \
+            f"Alice should be more defensive: Alice={result['Alice']}, Bob={result['Bob']}"
 
     def test_no_defensive_words(self):
         msgs = [
-            make_msg("David", 0, "hello world yes okay"),
-            make_msg("Mariam", 1, "hi there bye"),
+            make_msg("Alice", 0, "hello world yes okay"),
+            make_msg("Bob", 1, "hi there bye"),
         ]
-        result = defensiveness_index(msgs, ["David", "Mariam"])
-        assert result["David"] == 0.0 or result["David"] < 10
+        result = defensiveness_index(msgs, ["Alice", "Bob"])
+        assert result["Alice"] == 0.0 or result["Alice"] < 10
 
 
 class TestVocabularyContagion:
@@ -334,19 +334,19 @@ class TestVocabularyContagion:
 
     def test_word_adoption(self):
         msgs = [
-            # David introduces unique words
-            make_msg("David", 0, "let me use the word xyz123"),
-            make_msg("David", 1, "xyz123 is cool"),
-            make_msg("David", 2, "xyz123 again"),
-            make_msg("David", 3, "xyz123 once more"),
-            # Mariam starts using it too
-            make_msg("Mariam", 4, "yes xyz123 is great"),
-            make_msg("Mariam", 5, "xyz123 xyz123 love it"),
-            make_msg("Mariam", 6, "xyz123 forever"),
+            # Alice introduces unique words
+            make_msg("Alice", 0, "let me use the word xyz123"),
+            make_msg("Alice", 1, "xyz123 is cool"),
+            make_msg("Alice", 2, "xyz123 again"),
+            make_msg("Alice", 3, "xyz123 once more"),
+            # Bob starts using it too
+            make_msg("Bob", 4, "yes xyz123 is great"),
+            make_msg("Bob", 5, "xyz123 xyz123 love it"),
+            make_msg("Bob", 6, "xyz123 forever"),
         ]
-        result = vocabulary_contagion_rate(msgs, ["David", "Mariam"])
-        assert "David" in result
-        assert "Mariam" in result
+        result = vocabulary_contagion_rate(msgs, ["Alice", "Bob"])
+        assert "Alice" in result
+        assert "Bob" in result
 
 
 class TestSelectiveTopicAvoidance:
@@ -354,19 +354,19 @@ class TestSelectiveTopicAvoidance:
 
     def test_empty_when_no_topics(self):
         msgs = [
-            make_msg("David", 0, "hello"),
-            make_msg("Mariam", 5, "hi"),
+            make_msg("Alice", 0, "hello"),
+            make_msg("Bob", 5, "hi"),
         ]
-        result = selective_topic_avoidance(msgs, ["David", "Mariam"])
+        result = selective_topic_avoidance(msgs, ["Alice", "Bob"])
         # May return empty dict - that's valid
         assert isinstance(result, dict)
 
     def test_returns_dict(self):
         msgs = [
-            make_msg("David", 0, "talking about family stuff"),
-            make_msg("Mariam", 5, "hi"),
+            make_msg("Alice", 0, "talking about family stuff"),
+            make_msg("Bob", 5, "hi"),
         ]
-        result = selective_topic_avoidance(msgs, ["David", "Mariam"])
+        result = selective_topic_avoidance(msgs, ["Alice", "Bob"])
         assert isinstance(result, dict)
 
 
@@ -375,12 +375,12 @@ class TestConversationalGini:
 
     def test_returns_per_month(self):
         msgs = [
-            make_msg("David", 0, "hello world this is a longer message with more content"),
-            make_msg("Mariam", 1, "hi"),
-            make_msg("David", 2, "hey"),
-            make_msg("Mariam", 3, "yes"),
+            make_msg("Alice", 0, "hello world this is a longer message with more content"),
+            make_msg("Bob", 1, "hi"),
+            make_msg("Alice", 2, "hey"),
+            make_msg("Bob", 3, "yes"),
         ]
-        result = conversational_gini_coefficient(msgs, ["David", "Mariam"])
+        result = conversational_gini_coefficient(msgs, ["Alice", "Bob"])
         assert isinstance(result, dict)
         # Should have at least one period
         assert len(result) > 0
@@ -391,18 +391,18 @@ class TestConversationalInertia:
 
     def test_returns_number(self):
         msgs = [
-            make_msg("David", 0, "hello"),
-            make_msg("Mariam", 1, "hi"),
+            make_msg("Alice", 0, "hello"),
+            make_msg("Bob", 1, "hi"),
             # Big gap (simulate >72h)
-            make_msg("David", 10000, "hey"),
-            make_msg("Mariam", 10001, "hello"),
+            make_msg("Alice", 10000, "hey"),
+            make_msg("Bob", 10001, "hello"),
         ]
-        result = conversational_inertia(msgs, ["David", "Mariam"])
+        result = conversational_inertia(msgs, ["Alice", "Bob"])
         # C10: now returns a per-user breakdown (not a single blended float).
         assert isinstance(result, dict)
-        assert "David" in result and "Mariam" in result
-        assert result["David"]["avg_restart_effort"] >= 0
-        assert set(result["David"].keys()) == {
+        assert "Alice" in result and "Bob" in result
+        assert result["Alice"]["avg_restart_effort"] >= 0
+        assert set(result["Alice"].keys()) == {
             "avg_restart_effort", "failed_restarts", "answered_restarts"
         }
 
@@ -412,14 +412,14 @@ class TestSignalToNoiseRatio:
 
     def test_returns_per_user(self):
         msgs = [
-            make_msg("David", 0, "hello world this is meaningful content"),
-            make_msg("David", 1, "ok yeah yes no"),
-            make_msg("Mariam", 2, "hi there"),
+            make_msg("Alice", 0, "hello world this is meaningful content"),
+            make_msg("Alice", 1, "ok yeah yes no"),
+            make_msg("Bob", 2, "hi there"),
         ]
-        result = signal_to_noise_ratio(msgs, ["David", "Mariam"])
-        assert "David" in result
-        assert "Mariam" in result
-        assert isinstance(result["David"], (int, float))
+        result = signal_to_noise_ratio(msgs, ["Alice", "Bob"])
+        assert "Alice" in result
+        assert "Bob" in result
+        assert isinstance(result["Alice"], (int, float))
 
 
 class TestChaserRetreater:
@@ -427,12 +427,12 @@ class TestChaserRetreater:
 
     def test_returns_dict(self):
         msgs = [
-            make_msg("David", 0, "hello"),
-            make_msg("Mariam", 1, "hi"),
-            make_msg("David", 2, "hey"),
-            make_msg("Mariam", 3, "hello"),
+            make_msg("Alice", 0, "hello"),
+            make_msg("Bob", 1, "hi"),
+            make_msg("Alice", 2, "hey"),
+            make_msg("Bob", 3, "hello"),
         ]
-        result = chaser_retreater_oscillation(msgs, ["David", "Mariam"])
+        result = chaser_retreater_oscillation(msgs, ["Alice", "Bob"])
         assert isinstance(result, dict)
 
 
@@ -441,17 +441,17 @@ class TestTitForTat:
 
     def test_returns_per_user(self):
         msgs = [
-            make_msg("David", 0, "hi"),
-            make_msg("Mariam", 5, "hello"),
-            make_msg("David", 10, "hey"),
-            make_msg("Mariam", 15, "hi"),
-            make_msg("David", 20, "hello"),
+            make_msg("Alice", 0, "hi"),
+            make_msg("Bob", 5, "hello"),
+            make_msg("Alice", 10, "hey"),
+            make_msg("Bob", 15, "hi"),
+            make_msg("Alice", 20, "hello"),
         ]
-        result = tit_for_tat_retaliation_score(msgs, ["David", "Mariam"])
-        assert "David" in result
-        assert "Mariam" in result
-        assert 0 <= result["David"] <= 1
-        assert 0 <= result["Mariam"] <= 1
+        result = tit_for_tat_retaliation_score(msgs, ["Alice", "Bob"])
+        assert "Alice" in result
+        assert "Bob" in result
+        assert 0 <= result["Alice"] <= 1
+        assert 0 <= result["Bob"] <= 1
 
 
 class TestTemporalSyncopation:
@@ -459,16 +459,16 @@ class TestTemporalSyncopation:
 
     def test_returns_per_user(self):
         msgs = [
-            make_msg("David", 0, "hello"),
-            make_msg("Mariam", 1, "hi"),
-            make_msg("David", 2, "hey"),
-            make_msg("Mariam", 10, "hello"),  # Larger gap
-            make_msg("David", 11, "hello"),
+            make_msg("Alice", 0, "hello"),
+            make_msg("Bob", 1, "hi"),
+            make_msg("Alice", 2, "hey"),
+            make_msg("Bob", 10, "hello"),  # Larger gap
+            make_msg("Alice", 11, "hello"),
         ]
-        result = temporal_syncopation_variance(msgs, ["David", "Mariam"])
-        assert "David" in result
-        assert "Mariam" in result
-        assert isinstance(result["David"], (int, float))
+        result = temporal_syncopation_variance(msgs, ["Alice", "Bob"])
+        assert "Alice" in result
+        assert "Bob" in result
+        assert isinstance(result["Alice"], (int, float))
 
 
 # ============================================================
@@ -484,17 +484,17 @@ class TestFullPipeline:
         # Create 30 days of messages
         for day in range(30):
             for hour in range(8, 22):
-                sender = "David" if (day + hour) % 2 == 0 else "Mariam"
-                content = "hello world" if sender == "David" else "hi there friend"
+                sender = "Alice" if (day + hour) % 2 == 0 else "Bob"
+                content = "hello world" if sender == "Alice" else "hi there friend"
                 msgs.append(make_msg(sender, day * 60 + hour, content))
 
         data = {
-            "participants": [{"name": "David"}, {"name": "Mariam"}],
+            "participants": [{"name": "Alice"}, {"name": "Bob"}],
             "title": "Full Pipeline Test",
             "messages": msgs,
         }
 
-        analyzer = ChatAnalyzer(data, "David")
+        analyzer = ChatAnalyzer(data, "Alice")
         result = analyzer.analyze()
 
         # Check all 24 metrics are present

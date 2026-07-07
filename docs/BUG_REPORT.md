@@ -49,7 +49,7 @@ Every module uses `datetime.fromtimestamp(ts_ms / 1000)` (`analyzer.py:59`, `ana
 **Pseudo-fix:** `has_msgs = any(chat_dir.glob("message_*.json")) or (chat_dir / "combined_message.json").exists()`
 
 ### A6. 🟡 CLI/session parameters accepted but ignored
-`main.py:61-67` — `run_chat_pipeline` takes `session_gap_hours`, `min_session_messages`, `min_session_duration_s` but never forwards them to `chunk_messages` (main.py:105). Also `chunk_messages` mutates module-level globals (`session_chunker.py:124-126`) — not re-entrant. Also hardcoded: export folder name (`main.py:41`), `drxnem → David` (`main.py:93`), `'Mariam Merabishvili'` in the summary print (`main.py:124`).
+`main.py:61-67` — `run_chat_pipeline` takes `session_gap_hours`, `min_session_messages`, `min_session_duration_s` but never forwards them to `chunk_messages` (main.py:105). Also `chunk_messages` mutates module-level globals (`session_chunker.py:124-126`) — not re-entrant. Also hardcoded: export folder name (`main.py:41`), `some_id → <account-owner-name>` (`main.py:93`), `'Some Contact Full Name'` in the summary print (`main.py:124`).
 
 **Pseudo-fix:** thread parameters through function args (or a `Config` dataclass); delete the globals; derive "my name" from the export folder's profile, not hardcoded strings.
 

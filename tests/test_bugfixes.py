@@ -41,7 +41,7 @@ class TestSystemMessageDetection:
         assert is_system_message("Liked a message") is True
 
     def test_normalize_flags_like_as_system(self):
-        out = normalize_message({"sender_name": "David", "timestamp_ms": 1000,
+        out = normalize_message({"sender_name": "Alice", "timestamp_ms": 1000,
                                  "content": "Liked a message"})
         assert out["language"] == "system"
         assert is_real_message(out) is False
@@ -101,14 +101,14 @@ class TestTinySessionMergeThreshold:
         base = self._base()
         msgs = [
             # Tiny 2-message exchange in January
-            msg("David", _epoch_ms(base), "hi"),
-            msg("Mariam", _epoch_ms(base + timedelta(minutes=1)), "hey"),
+            msg("Alice", _epoch_ms(base), "hi"),
+            msg("Bob", _epoch_ms(base + timedelta(minutes=1)), "hey"),
             # Large session ~40 days later
-            *[msg("David" if i % 2 == 0 else "Mariam",
+            *[msg("Alice" if i % 2 == 0 else "Bob",
                   _epoch_ms(base + timedelta(days=40, minutes=i)), f"m{i}")
               for i in range(6)],
         ]
-        sessions = chunk_messages(msgs, "David", "Mariam")
+        sessions = chunk_messages(msgs, "Alice", "Bob")
         large = [s for s in sessions if s["messages"]["total"] >= 3]
         assert len(large) == 1
         # Its duration must NOT be inflated to tens of thousands of minutes.
@@ -119,14 +119,14 @@ class TestTinySessionMergeThreshold:
     def test_near_tiny_session_is_merged(self):
         base = self._base()
         msgs = [
-            msg("David", _epoch_ms(base), "hi"),
-            msg("Mariam", _epoch_ms(base + timedelta(minutes=1)), "hey"),
+            msg("Alice", _epoch_ms(base), "hi"),
+            msg("Bob", _epoch_ms(base + timedelta(minutes=1)), "hey"),
             # Large session only 30 minutes later (within 60-min threshold)
-            *[msg("David" if i % 2 == 0 else "Mariam",
+            *[msg("Alice" if i % 2 == 0 else "Bob",
                   _epoch_ms(base + timedelta(minutes=30 + i)), f"m{i}")
               for i in range(4)],
         ]
-        sessions = chunk_messages(msgs, "David", "Mariam")
+        sessions = chunk_messages(msgs, "Alice", "Bob")
         merged = [s for s in sessions if s["messages"]["total"] == 6]
         assert len(merged) == 1
         assert merged[0]["valid"] is True
@@ -137,28 +137,28 @@ class TestThoughtFragmentationDenominator:
     def test_denominator_is_sessions_not_messages(self):
         base = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         msgs = [
-            # David rapid-fires 3 messages within 15s (a burst)
-            msg("David", _epoch_ms(base), "one"),
-            msg("David", _epoch_ms(base + timedelta(seconds=5)), "two"),
-            msg("David", _epoch_ms(base + timedelta(seconds=10)), "three"),
-            # Mariam replies within the same session
-            msg("Mariam", _epoch_ms(base + timedelta(minutes=5)), "ok"),
+            # Alice rapid-fires 3 messages within 15s (a burst)
+            msg("Alice", _epoch_ms(base), "one"),
+            msg("Alice", _epoch_ms(base + timedelta(seconds=5)), "two"),
+            msg("Alice", _epoch_ms(base + timedelta(seconds=10)), "three"),
+            # Bob replies within the same session
+            msg("Bob", _epoch_ms(base + timedelta(minutes=5)), "ok"),
         ]
-        result = thought_fragmentation_index(msgs, ["David", "Mariam"])
-        # One session, David burst -> index 1.0 (not deflated by message count).
-        assert result["David"] == 1.0
-        assert result["Mariam"] == 0.0
+        result = thought_fragmentation_index(msgs, ["Alice", "Bob"])
+        # One session, Alice burst -> index 1.0 (not deflated by message count).
+        assert result["Alice"] == 1.0
+        assert result["Bob"] == 0.0
 
     def test_pingpong_is_not_fragmentation(self):
         base = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         msgs = [
-            msg("David", _epoch_ms(base), "a"),
-            msg("Mariam", _epoch_ms(base + timedelta(seconds=4)), "b"),
-            msg("David", _epoch_ms(base + timedelta(seconds=8)), "c"),
+            msg("Alice", _epoch_ms(base), "a"),
+            msg("Bob", _epoch_ms(base + timedelta(seconds=4)), "b"),
+            msg("Alice", _epoch_ms(base + timedelta(seconds=8)), "c"),
         ]
         # 3 fast messages but alternating senders -> NOT a burst.
-        result = thought_fragmentation_index(msgs, ["David", "Mariam"])
-        assert result["David"] == 0.0
+        result = thought_fragmentation_index(msgs, ["Alice", "Bob"])
+        assert result["Alice"] == 0.0
 
 
 # ------------------------------------------------------------------ C2
@@ -166,27 +166,27 @@ class TestFinalWordFirstSession:
     def test_first_session_single_message_ender_counted(self):
         base = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         msgs = [
-            # Session 1: a single message from David
-            msg("David", _epoch_ms(base), "hey"),
-            # Session 2 (after a >2h gap), ended by Mariam
-            msg("David", _epoch_ms(base + timedelta(hours=5)), "back"),
-            msg("Mariam", _epoch_ms(base + timedelta(hours=5, minutes=2)), "hi"),
+            # Session 1: a single message from Alice
+            msg("Alice", _epoch_ms(base), "hey"),
+            # Session 2 (after a >2h gap), ended by Bob
+            msg("Alice", _epoch_ms(base + timedelta(hours=5)), "back"),
+            msg("Bob", _epoch_ms(base + timedelta(hours=5, minutes=2)), "hi"),
         ]
-        result = final_word_dominance(msgs, ["David", "Mariam"])
+        result = final_word_dominance(msgs, ["Alice", "Bob"])
         # Two sessions; each ender counted; percentages sum to 1.0.
         assert round(sum(result.values()), 4) == 1.0
-        assert result["David"] == 0.5
-        assert result["Mariam"] == 0.5
+        assert result["Alice"] == 0.5
+        assert result["Bob"] == 0.5
 
     def test_accepts_precomputed_sessions(self):
         sessions = [
-            {"participants": {"ended_by": "David"}},
-            {"participants": {"ended_by": "Mariam"}},
-            {"participants": {"ended_by": "David"}},
+            {"participants": {"ended_by": "Alice"}},
+            {"participants": {"ended_by": "Bob"}},
+            {"participants": {"ended_by": "Alice"}},
         ]
-        result = final_word_dominance([], ["David", "Mariam"], sessions=sessions)
-        assert result["David"] == round(2 / 3, 4)
-        assert result["Mariam"] == round(1 / 3, 4)
+        result = final_word_dominance([], ["Alice", "Bob"], sessions=sessions)
+        assert result["Alice"] == round(2 / 3, 4)
+        assert result["Bob"] == round(1 / 3, 4)
 
 
 # ------------------------------------------------------------------ C3
@@ -196,16 +196,16 @@ class TestDisjointCoolingWindows:
         msgs = []
         for d in range(28):
             content = "wooow 😍😍" if d < 14 else "ok"
-            msgs.append(msg("David", _epoch_ms(base + timedelta(days=d)), content))
-        result = emotional_cooling_alert(msgs, ["David"])
+            msgs.append(msg("Alice", _epoch_ms(base + timedelta(days=d)), content))
+        result = emotional_cooling_alert(msgs, ["Alice"])
         assert result["total_cold_shifts"] >= 1
-        assert any(v["user"] == "David" for v in result["alerts"].values())
+        assert any(v["user"] == "Alice" for v in result["alerts"].values())
 
     def test_stable_expressiveness_no_alert(self):
         base = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-        msgs = [msg("David", _epoch_ms(base + timedelta(days=d)), "wooow 😍")
+        msgs = [msg("Alice", _epoch_ms(base + timedelta(days=d)), "wooow 😍")
                 for d in range(28)]
-        result = emotional_cooling_alert(msgs, ["David"])
+        result = emotional_cooling_alert(msgs, ["Alice"])
         assert result["total_cold_shifts"] == 0
 
 
@@ -214,16 +214,16 @@ class TestSyncopationLastSessionFlush:
     def test_single_gapless_session_is_processed(self):
         base = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         msgs = [
-            msg("David", _epoch_ms(base), "a"),
-            msg("Mariam", _epoch_ms(base + timedelta(seconds=30)), "b"),
-            msg("David", _epoch_ms(base + timedelta(minutes=10)), "c"),
-            msg("Mariam", _epoch_ms(base + timedelta(minutes=11)), "d"),
+            msg("Alice", _epoch_ms(base), "a"),
+            msg("Bob", _epoch_ms(base + timedelta(seconds=30)), "b"),
+            msg("Alice", _epoch_ms(base + timedelta(minutes=10)), "c"),
+            msg("Bob", _epoch_ms(base + timedelta(minutes=11)), "d"),
         ]
         # No 4h/2h gap anywhere -> the whole chat is one session that must
         # still be flushed and processed (old code skipped the last session).
-        result = temporal_syncopation_variance(msgs, ["David", "Mariam"])
+        result = temporal_syncopation_variance(msgs, ["Alice", "Bob"])
         assert result != {}
-        assert "David" in result and "Mariam" in result
+        assert "Alice" in result and "Bob" in result
 
 
 # ------------------------------------------------------------------ C14
@@ -233,14 +233,14 @@ class TestISOWeekYearBoundary:
         d1 = _epoch_ms(datetime(2024, 12, 30, 12, 0, tzinfo=timezone.utc))
         d2 = _epoch_ms(datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc))
         data = {
-            "participants": [{"name": "David"}, {"name": "Mariam"}],
+            "participants": [{"name": "Alice"}, {"name": "Bob"}],
             "title": "T",
             "messages": [
-                msg("David", d1, "one"),
-                msg("Mariam", d2, "two"),
+                msg("Alice", d1, "one"),
+                msg("Bob", d2, "two"),
             ],
         }
-        analyzer = ChatAnalyzer(data, "David")
+        analyzer = ChatAnalyzer(data, "Alice")
         weeks = analyzer._get_messages_per_week()
         # No phantom 2024 bucket; both messages in ISO-year 2025, week 1.
         assert "2024" not in weeks

@@ -24,7 +24,7 @@ from src.metrics_v4 import (
     change_point_metrics,
 )
 
-USERS = ["David", "Mariam"]
+USERS = ["Alice", "Bob"]
 BASE = datetime(2025, 1, 6, 12, 0, 0)  # a Monday, local naive
 
 
@@ -53,24 +53,24 @@ def make_msg(sender, offset_minutes, content="", reactions=None,
 
 class TestInitiation:
     def test_share_and_latency(self):
-        # Session 1: David opens. Gap 3h. Session 2: Mariam opens.
+        # Session 1: Alice opens. Gap 3h. Session 2: Bob opens.
         msgs = [
-            make_msg("David", 0, "hi"),
-            make_msg("Mariam", 5, "hey"),
-            make_msg("David", 10, "bye"),
+            make_msg("Alice", 0, "hi"),
+            make_msg("Bob", 5, "hey"),
+            make_msg("Alice", 10, "bye"),
             # 3h gap (> 2h session gap) -> new session
-            make_msg("Mariam", 10 + 180, "back?"),
-            make_msg("David", 10 + 185, "yes"),
+            make_msg("Bob", 10 + 180, "back?"),
+            make_msg("Alice", 10 + 185, "yes"),
         ]
         r = initiation_metrics(msgs, USERS)
         assert r["n"] == 2
-        assert r["per_user"]["David"]["initiation_count"] == 1
-        assert r["per_user"]["Mariam"]["initiation_count"] == 1
-        assert r["per_user"]["David"]["initiation_share"] == 0.5
-        # Mariam reopened after a 3h silence (session1 ended at +10, session2 +190).
-        assert r["per_user"]["Mariam"]["median_reopen_latency_hours"] == 3.0
-        # David never reopened (opened the very first session only).
-        assert r["per_user"]["David"]["median_reopen_latency_hours"] == 0.0
+        assert r["per_user"]["Alice"]["initiation_count"] == 1
+        assert r["per_user"]["Bob"]["initiation_count"] == 1
+        assert r["per_user"]["Alice"]["initiation_share"] == 0.5
+        # Bob reopened after a 3h silence (session1 ended at +10, session2 +190).
+        assert r["per_user"]["Bob"]["median_reopen_latency_hours"] == 3.0
+        # Alice never reopened (opened the very first session only).
+        assert r["per_user"]["Alice"]["median_reopen_latency_hours"] == 0.0
 
 
 # ============================================================
@@ -79,16 +79,16 @@ class TestInitiation:
 
 class TestQuestions:
     def test_answered_vs_ignored(self):
-        # One session. David asks Q1 (answered by Mariam), then at the end asks
+        # One session. Alice asks Q1 (answered by Bob), then at the end asks
         # Q2 with nobody replying -> ignored.
         msgs = [
-            make_msg("David", 0, "why is that?"),   # Q1
-            make_msg("Mariam", 2, "because reasons"),  # answers Q1
-            make_msg("David", 5, "how come?"),      # Q2 - no later different sender
+            make_msg("Alice", 0, "why is that?"),   # Q1
+            make_msg("Bob", 2, "because reasons"),  # answers Q1
+            make_msg("Alice", 5, "how come?"),      # Q2 - no later different sender
         ]
         r = question_metrics(msgs, USERS)
         assert r["n"] == 2
-        d = r["per_user"]["David"]
+        d = r["per_user"]["Alice"]
         assert d["questions_asked"] == 2
         assert d["answered_rate"] == 0.5
         assert d["ignored_count"] == 1
@@ -100,18 +100,18 @@ class TestQuestions:
 
 class TestBids:
     def test_toward_vs_away(self):
-        # David makes two bids (exclamations). First engaged, second ignored.
+        # Alice makes two bids (exclamations). First engaged, second ignored.
         msgs = [
-            make_msg("David", 0, "look at this!"),   # bid 1
-            make_msg("Mariam", 2, "nice"),           # turns toward bid 1
-            make_msg("David", 5, "amazing!"),        # bid 2 - no reply follows
+            make_msg("Alice", 0, "look at this!"),   # bid 1
+            make_msg("Bob", 2, "nice"),           # turns toward bid 1
+            make_msg("Alice", 5, "amazing!"),        # bid 2 - no reply follows
         ]
         r = bid_response_metrics(msgs, USERS)
         assert r["n"] == 2
-        assert r["per_user"]["David"]["bids_made"] == 2
-        assert r["per_user"]["David"]["partner_turned_toward_rate"] == 0.5
-        # Mariam turned toward the one bid opportunity she had.
-        assert r["per_user"]["Mariam"]["toward_rate_given"] == 0.5
+        assert r["per_user"]["Alice"]["bids_made"] == 2
+        assert r["per_user"]["Alice"]["partner_turned_toward_rate"] == 0.5
+        # Bob turned toward the one bid opportunity she had.
+        assert r["per_user"]["Bob"]["toward_rate_given"] == 0.5
 
 
 # ============================================================
@@ -122,15 +122,15 @@ class TestAffect:
     def test_reactions_with_mojibake_actor(self):
         georgian = "მარიამ"
         mojibake_actor = georgian.encode("utf-8").decode("latin-1")
-        users = ["David", georgian]
+        users = ["Alice", georgian]
         msgs = [
-            make_msg("David", 0, "gaixare",
+            make_msg("Alice", 0, "gaixare",
                      reactions=[{"reaction": "❤", "actor": mojibake_actor}]),
             make_msg(georgian, 2, "gilocav"),
         ]
         r = affect_economy_metrics(msgs, users)
         assert r["per_user"][georgian]["reactions_given"] == 1
-        assert r["per_user"]["David"]["reactions_received"] == 1
+        assert r["per_user"]["Alice"]["reactions_received"] == 1
         assert r["n"] >= 1
 
 
@@ -154,11 +154,11 @@ class TestCircadian:
                              "content": "hi", "language": "english"})
         r = circadian_metrics(msgs, USERS)
         assert r["overlap_coefficient"] == 1.0
-        assert r["per_user"]["David"]["night_share"] == 0.5
-        assert r["per_user"]["Mariam"]["night_share"] == 0.5
+        assert r["per_user"]["Alice"]["night_share"] == 0.5
+        assert r["per_user"]["Bob"]["night_share"] == 0.5
         assert r["n"] == 4
-        assert len(r["matrices"]["David"]) == 7
-        assert len(r["matrices"]["David"][0]) == 24
+        assert len(r["matrices"]["Alice"]) == 7
+        assert len(r["matrices"]["Alice"][0]) == 24
 
 
 # ============================================================
@@ -167,22 +167,22 @@ class TestCircadian:
 
 class TestRepair:
     def test_rupture_and_repair_attribution(self):
-        # Session 1 ended by David. 50h silence (>48h) -> rupture. Session 2
-        # opened by Mariam -> she is the repairer.
+        # Session 1 ended by Alice. 50h silence (>48h) -> rupture. Session 2
+        # opened by Bob -> she is the repairer.
         msgs = [
-            make_msg("David", 0, "hey"),
-            make_msg("Mariam", 5, "hi"),
-            make_msg("David", 10, "ok bye"),        # David ends session 1
+            make_msg("Alice", 0, "hey"),
+            make_msg("Bob", 5, "hi"),
+            make_msg("Alice", 10, "ok bye"),        # Alice ends session 1
             # 50h gap
-            make_msg("Mariam", 10 + 50 * 60, "you there?"),  # Mariam repairs
-            make_msg("David", 10 + 50 * 60 + 5, "yes"),
+            make_msg("Bob", 10 + 50 * 60, "you there?"),  # Bob repairs
+            make_msg("Alice", 10 + 50 * 60 + 5, "yes"),
         ]
         r = repair_metrics(msgs, USERS)
         assert r["n"] == 1
-        assert r["per_user"]["David"]["ruptures_caused"] == 1
-        assert r["per_user"]["Mariam"]["repairs_made"] == 1
-        assert r["per_user"]["Mariam"]["repair_share"] == 1.0
-        assert abs(r["per_user"]["Mariam"]["median_repair_latency_hours"] - 50.0) < 0.5
+        assert r["per_user"]["Alice"]["ruptures_caused"] == 1
+        assert r["per_user"]["Bob"]["repairs_made"] == 1
+        assert r["per_user"]["Bob"]["repair_share"] == 1.0
+        assert abs(r["per_user"]["Bob"]["median_repair_latency_hours"] - 50.0) < 0.5
 
 
 # ============================================================
@@ -191,17 +191,17 @@ class TestRepair:
 
 class TestDoubleTexting:
     def test_double_text_and_streak(self):
-        # David sends 3 consecutive messages 15 min apart (partner silent),
-        # then Mariam replies. Run length 3 -> streak '3'; two >=10min gaps -> 2
+        # Alice sends 3 consecutive messages 15 min apart (partner silent),
+        # then Bob replies. Run length 3 -> streak '3'; two >=10min gaps -> 2
         # double texts.
         msgs = [
-            make_msg("David", 0, "you up?"),
-            make_msg("David", 15, "hello?"),
-            make_msg("David", 30, "guess not"),
-            make_msg("Mariam", 40, "sorry here"),
+            make_msg("Alice", 0, "you up?"),
+            make_msg("Alice", 15, "hello?"),
+            make_msg("Alice", 30, "guess not"),
+            make_msg("Bob", 40, "sorry here"),
         ]
         r = double_texting_metrics(msgs, USERS)
-        d = r["per_user"]["David"]
+        d = r["per_user"]["Alice"]
         assert d["double_texts"] == 2
         assert d["max_unanswered_streak"] == 3
         assert d["streak_histogram"].get("3") == 1
@@ -215,15 +215,15 @@ class TestDoubleTexting:
 class TestHalfLife:
     def test_momentum_kill_attribution(self):
         # 6 messages: fast first half, slow second half. second-half median (10)
-        # > 3x first-half median (1) -> momentum lost. Last holder = David.
+        # > 3x first-half median (1) -> momentum lost. Last holder = Alice.
         offsets = [0, 1, 2, 12, 22, 32]  # intervals: 1,1,10,10,10
-        senders = ["David", "Mariam", "David", "Mariam", "Mariam", "David"]
+        senders = ["Alice", "Bob", "Alice", "Bob", "Bob", "Alice"]
         msgs = [make_msg(s, o, "msg") for s, o in zip(senders, offsets)]
         r = half_life_metrics(msgs, USERS)
         assert r["n"] == 1
-        assert r["per_user"]["David"]["sessions_last_held"] == 1
-        assert r["per_user"]["David"]["momentum_kill_share"] == 1.0
-        assert r["per_user"]["Mariam"]["momentum_kill_share"] == 0.0
+        assert r["per_user"]["Alice"]["sessions_last_held"] == 1
+        assert r["per_user"]["Alice"]["momentum_kill_share"] == 1.0
+        assert r["per_user"]["Bob"]["momentum_kill_share"] == 0.0
 
 
 # ============================================================
@@ -238,7 +238,7 @@ class TestChangePoints:
             count = 3 if week < 15 else 30
             week_base = week * 7 * 24 * 60  # minutes offset, 1 week apart
             for k in range(count):
-                sender = "David" if k % 2 == 0 else "Mariam"
+                sender = "Alice" if k % 2 == 0 else "Bob"
                 msgs.append(make_msg(sender, week_base + k, "hello there"))
         r = change_point_metrics(msgs, USERS)
         assert r["n"] == 30

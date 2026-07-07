@@ -37,7 +37,7 @@ Per the dataviz interaction rules: **one filter row, above all content; date ran
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │ [Date range ▾: All time · 30d · 90d · 1y · Custom]  [Granularity: D/W/M]│
-│ [View: Both ▾ | David | Partner | Difference]   [Compare: + period]  ☾ │
+│ [View: Both ▾ | User A | User B | Difference]   [Compare: + period]  ☾ │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -56,7 +56,7 @@ Stat tiles, not charts: total messages (in range), messages/day with delta vs pr
 ### §B — Story Timeline (the centerpiece)
 One full-width band, three synchronized lanes sharing an x-axis with a `dataZoom` brush:
 
-1. **Volume river** — stacked/mirrored area, David above axis, partner mirrored below (balance visible at a glance).
+1. **Volume river** — stacked/mirrored area, User A above axis, partner mirrored below (balance visible at a glance).
 2. **Metric lane** — user-selectable overlay (dropdown: response latency, affect rate, night-share, depth, initiation ratio…), one line per user. Single y-axis; switching metric swaps the lane, never adds a second axis (dual axes are banned).
 3. **Event lane** — markers: change-points (M14, diamond), ruptures/repairs (M7), ritual breaks (M6), longest-silence bars, LLM-annotated episodes. Hover = summary card; **click = opens the Evidence drawer** (see §F) with the transcript around that date and the LLM "what happened" note.
 

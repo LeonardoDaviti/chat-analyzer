@@ -31,8 +31,8 @@ def _write_inbox_zip(zip_path: Path, chats: dict) -> None:
 def test_import_zip_extracts_and_counts(tmp_path):
     zip_path = tmp_path / "instagram-export-2026.zip"
     _write_inbox_zip(zip_path, {
-        "alice_123": ["David", "Alice"],
-        "bob_456": ["David", "Bob"],
+        "alice_123": ["Owner", "Alice"],
+        "bob_456": ["Owner", "Bob"],
     })
 
     target = main.import_zip(str(zip_path), tmp_path)
@@ -70,14 +70,14 @@ def test_import_zip_missing_inbox_errors(tmp_path):
 
 
 def test_owner_detection_most_common_participant():
-    # David is in every chat; partners each appear once.
+    # Owner is in every chat; partners each appear once.
     chats = [
-        ["David", "Alice"],
-        ["David", "Bob"],
-        ["David", "Carol"],
-        ["David", "Alice", "Eve"],  # a group chat
+        ["Owner", "Alice"],
+        ["Owner", "Bob"],
+        ["Owner", "Carol"],
+        ["Owner", "Alice", "Eve"],  # a group chat
     ]
-    assert main.detect_owner_from_participants(chats) == "David"
+    assert main.detect_owner_from_participants(chats) == "Owner"
 
 
 def test_owner_detection_empty():
@@ -89,11 +89,11 @@ def test_owner_detection_end_to_end(tmp_path):
     """detect_owner reads participants from real chat dirs on disk."""
     zip_path = tmp_path / "export.zip"
     _write_inbox_zip(zip_path, {
-        "alice_1": ["David", "Alice"],
-        "bob_2": ["David", "Bob"],
-        "carol_3": ["David", "Carol"],
+        "alice_1": ["Owner", "Alice"],
+        "bob_2": ["Owner", "Bob"],
+        "carol_3": ["Owner", "Carol"],
     })
     target = main.import_zip(str(zip_path), tmp_path)
     inbox = Path(target).joinpath(*main._INBOX_SUFFIX)
     chat_dirs = [str(d) for d in inbox.iterdir() if d.is_dir()]
-    assert main.detect_owner(chat_dirs) == "David"
+    assert main.detect_owner(chat_dirs) == "Owner"

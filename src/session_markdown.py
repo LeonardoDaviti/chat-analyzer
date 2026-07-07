@@ -11,10 +11,10 @@ Format:
 
 Usage:
     from src.session_markdown import export_sessions_to_markdown
-    
+
     export_sessions_to_markdown(
-        sessions_path='Outputs/Mariam Merabishvili/2026-05-12_19-28/sessions.json',
-        output_dir='Outputs/Mariam Merabishvili/2026-05-12_19-28/sessions_md'
+        sessions_path='Outputs/<chat-name>/sessions.json',
+        output_dir='Outputs/<chat-name>/sessions_md'
     )
 """
 
@@ -127,13 +127,13 @@ def group_consecutive_msgs(all_msgs: List[Dict[str, Any]]) -> List[Dict[str, Any
 def build_session_markdown(
     session_group: List[Dict[str, Any]],
     chat_name: str,
-    my_name: str = "David"
+    my_name: str = "You"
 ) -> str:
     """Build markdown content for a group of sessions.
-    
+
     Inserts {new_date} markers when the calendar day changes between messages,
     so LLMs don't hallucinate about conversation context across days.
-    
+
     Args:
         session_group: List of sessions to combine
         chat_name: Display name for the chat
@@ -277,10 +277,10 @@ def export_sessions_to_markdown(
     output_dir: str,
     chat_name: str = "Chat",
     min_session_messages: int = 200,
-    my_name: str = "David"
+    my_name: str = "You"
 ) -> List[Path]:
     """Export sessions to markdown files.
-    
+
     Args:
         sessions_path: Path to sessions.json file
         output_dir: Directory where markdown files will be saved
@@ -344,10 +344,10 @@ def export_sessions_to_markdown(
 
 if __name__ == "__main__":
     import sys
-    
-    sessions_path = "Outputs/Mariam Merabishvili/2026-05-12_19-28/sessions.json"
-    output_base = "Outputs/Mariam Merabishvili/2026-05-12_19-28/sessions_md"
-    chat_name = "Mariam Merabishvili"
+
+    sessions_path = "Outputs/<chat-name>/sessions.json"
+    output_base = "Outputs/<chat-name>/sessions_md"
+    chat_name = "Chat Partner"
     
     if len(sys.argv) > 1:
         sessions_path = sys.argv[1]

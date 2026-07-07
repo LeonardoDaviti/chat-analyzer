@@ -140,7 +140,7 @@ automatically (it's the person who appears in every conversation), and analyzes
 each chat. You'll see a line like:
 
 ```
-Detected account owner: David (use --my-name to override)
+Detected account owner: <owner-name> (use --my-name to override)
 ```
 
 If it guesses your name wrong, you can set it yourself:
@@ -166,8 +166,8 @@ in your normal web browser as a private local page.
 You can focus on one or a few conversations by name:
 
 ```
-python main.py --chat "Mariam"
-python build_dashboard.py --chat "Mariam"
+python main.py --chat "<chat-name>"
+python build_dashboard.py --chat "<chat-name>"
 ```
 
 Or analyze everything but skip some chats:
@@ -233,8 +233,8 @@ correctly. You don't need to do anything.
 
 **How do I analyze just one conversation?**
 Use the `--chat` option with part of the person's name, for example
-`python main.py --chat "Mariam"` and then
-`python build_dashboard.py --chat "Mariam"`.
+`python main.py --chat "<chat-name>"` and then
+`python build_dashboard.py --chat "<chat-name>"`.
 
 **Where are my results?**
 Charts and data are in `Outputs/`. The interactive page is
