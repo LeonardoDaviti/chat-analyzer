@@ -14,7 +14,6 @@ import math
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Any
-import numpy as np
 
 from src.timeutil import to_datetime, DEFAULT_TIMEZONE
 from src.config import SESSION_GAP_HOURS

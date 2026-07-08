@@ -1,7 +1,8 @@
 """Connected Analysis — owner-centric cross-chat computation module.
 
-Merges every Instagram chat into one timeline and profiles the OWNER (their
-texting behaviour, attention, and social portfolio). See
+Merges chats into one timeline and profiles the OWNER (their texting behaviour,
+attention, and social portfolio). Builds three variants — ``instagram``,
+``telegram`` and a merged ``all`` (dual-owner, cross-platform attention). See
 ``docs/CONNECTED_ANALYSIS.md`` for the full metric definitions and output schema.
 
 Everything here is NEW code; all pipeline infrastructure is reused read-only
@@ -196,16 +197,21 @@ def _len_field(val: Any) -> int:
 class Chat:
     """A loaded chat reduced to numeric records plus metadata."""
 
-    __slots__ = ('chat_id', 'name', 'participants', 'is_group', 'recs', 'thread_path')
+    __slots__ = ('chat_id', 'name', 'participants', 'is_group', 'recs',
+                 'thread_path', 'platform')
 
     def __init__(self, chat_id: str, name: str, participants: List[str],
-                 recs: List[Dict[str, Any]], thread_path: str = ''):
+                 recs: List[Dict[str, Any]], thread_path: str = '',
+                 platform: str = 'instagram', is_group: Optional[bool] = None):
         self.chat_id = chat_id
         self.name = name
         self.participants = participants
-        self.is_group = len(participants) >= 3
+        # Telegram carries an authoritative is_group flag (a 2-person group is
+        # still a group); Instagram infers it from the participant count.
+        self.is_group = (len(participants) >= 3) if is_group is None else bool(is_group)
         self.recs = recs
         self.thread_path = thread_path
+        self.platform = platform
 
 
 def load_chat(chat_dir: Path, taken: set, timezone: str) -> Optional[Chat]:
@@ -221,7 +227,58 @@ def load_chat(chat_dir: Path, taken: set, timezone: str) -> Optional[Chat]:
     recs = [reduce_message(m, timezone) for m in data.get('messages', [])]
     recs.sort(key=lambda r: r['timestamp_ms'])
     return Chat(slugify(name, taken), name, participants, recs,
-                thread_path=str(data.get('thread_path') or ''))
+                thread_path=str(data.get('thread_path') or ''),
+                platform='instagram')
+
+
+# --------------------------------------------------------------------------- #
+# Telegram discovery + loading  (via the shared read-only loader)
+# --------------------------------------------------------------------------- #
+
+def discover_telegram_chats(chats_dir: str) -> List[Path]:
+    """Return Telegram export directories under ``chats_dir/Telegram``.
+
+    Each export is a directory containing a ``result.json`` (Telegram Desktop
+    "Export Chat History → JSON").
+    """
+    root = Path(chats_dir) / 'Telegram'
+    chats: List[Path] = []
+    if not root.exists():
+        return chats
+    for chat_dir in sorted(root.iterdir()):
+        if chat_dir.is_dir() and (chat_dir / 'result.json').exists():
+            chats.append(chat_dir)
+    return chats
+
+
+def load_telegram_chat(chat_dir: Path, taken: set, timezone: str) -> Optional[Chat]:
+    """Load a Telegram export dir and reduce it with the same ``reduce_message``
+    path Instagram uses.
+
+    Uses ``src.loaders.telegram.load_telegram_chat`` (read-only) to normalize the
+    ``result.json`` into the pipeline's chat shape, then reduces each message to
+    the compact numeric record and discards text — identical to Instagram.
+    """
+    from src.loaders.telegram import load_telegram_chat as _load_tg
+    try:
+        data = _load_tg(str(chat_dir))
+    except Exception:
+        return None
+    participants = [
+        decode_georgian_text(p.get('name', '') if isinstance(p, dict) else str(p))
+        for p in (data.get('participants') or [])
+    ]
+    participants = [p for p in participants if p]
+    name = decode_georgian_text(data.get('title') or chat_dir.name)
+    recs = [reduce_message(m, timezone) for m in data.get('messages', [])]
+    recs.sort(key=lambda r: r['timestamp_ms'])
+    # Telegram group-type chats (private_group / supergroup / channel …) carry an
+    # authoritative is_group flag; honour it so a 2-person group still lands in
+    # the groups lane, exactly like an Instagram group.
+    is_group = bool(data.get('is_group')) or len(participants) >= 3
+    return Chat(slugify(name, taken), name, participants, recs,
+                thread_path=str(data.get('thread_path') or ''),
+                platform='telegram', is_group=is_group)
 
 
 def dedup_chats(chats: List[Chat]) -> Tuple[List[Chat], int]:
@@ -294,6 +351,20 @@ def _month_index(mon: str) -> int:
     return int(y) * 12 + int(m)
 
 
+def _owner_set(owner: Any) -> frozenset:
+    """Normalize an owner argument to a set of owner display names.
+
+    Accepts a single name (Instagram/Telegram per-platform owner) or an iterable
+    of names (the ``all`` variant, where the owner is one human with a distinct
+    handle per platform — e.g. ``{'David', 'Davidus'}``).
+    """
+    if isinstance(owner, (set, frozenset)):
+        return frozenset(owner)
+    if isinstance(owner, (list, tuple)):
+        return frozenset(owner)
+    return frozenset({owner})
+
+
 # --------------------------------------------------------------------------- #
 # Session typing
 # --------------------------------------------------------------------------- #
@@ -305,7 +376,11 @@ def classify_session(session: List[Dict[str, Any]], owner: str,
     ``session`` is the list of REAL records (sorted). ``media_ts`` is the sorted
     list of media-message timestamps in the chat, used to count media that fell
     inside the session window without polluting the real-message turn logic.
+
+    ``owner`` may be a single name or a set of names (the ``all`` variant treats
+    both platform handles as the same owner).
     """
+    owners = _owner_set(owner)
     n = len(session)
     start = session[0]['timestamp_ms']
     end = session[-1]['timestamp_ms']
@@ -322,8 +397,8 @@ def classify_session(session: List[Dict[str, Any]], owner: str,
     total_words = sum(r['w'] for r in session)
     wpt = total_words / turns if turns else 0.0
     q = sum(1 for r in session if r['q'])
-    owner_words = sum(r['w'] for r in session if r['sender_name'] == owner)
-    owner_i = sum(r['i'] for r in session if r['sender_name'] == owner)
+    owner_words = sum(r['w'] for r in session if r['sender_name'] in owners)
+    owner_i = sum(r['i'] for r in session if r['sender_name'] in owners)
     i_rate = owner_i / owner_words if owner_words else 0.0
 
     media = bisect_right(media_ts, end) - bisect_left(media_ts, start)
@@ -345,16 +420,31 @@ def classify_session(session: List[Dict[str, Any]], owner: str,
 # Main builder
 # --------------------------------------------------------------------------- #
 
-def build_connected_data(chats: List[Chat], owner: str,
+def build_connected_data(chats: List[Chat], owner: Any,
                          timezone: str = DEFAULT_TIMEZONE,
                          min_msgs: int = 30, min_replies: int = 50,
-                         excluded_count: int = 0) -> Dict[str, Any]:
-    """Compute the full ``window.CONNECTED`` payload from loaded chats."""
-    dyads = [c for c in chats if not c.is_group and owner in c.participants]
+                         excluded_count: int = 0,
+                         variant: str = 'all',
+                         platforms: Optional[List[str]] = None,
+                         owner_names: Optional[Any] = None) -> Dict[str, Any]:
+    """Compute the full CONNECTED payload from loaded chats.
+
+    ``variant`` is one of ``instagram`` / ``telegram`` / ``all`` and is echoed in
+    the payload alongside ``platforms``. ``owner`` is the display label; for the
+    ``all`` variant pass ``owner_names`` (the two platform handles of the same
+    human) so BOTH are treated as owner when reducing messages — no cross-platform
+    contact-identity merging is done, only the owner is unified.
+    """
+    owners = _owner_set(owner_names) if owner_names is not None else _owner_set(owner)
+    owner_label = owner if isinstance(owner, str) else (sorted(owners)[0] if owners else '')
+    if platforms is None:
+        platforms = sorted({getattr(c, 'platform', 'instagram') for c in chats}) or ['instagram']
+
+    dyads = [c for c in chats if not c.is_group and any(o in c.participants for o in owners)]
     # A chat where the owner isn't a listed participant but authored messages is
     # still treated as a dyad against the other participant.
     for c in chats:
-        if not c.is_group and owner not in c.participants and c not in dyads:
+        if not c.is_group and not any(o in c.participants for o in owners) and c not in dyads:
             dyads.append(c)
     groups = [c for c in chats if c.is_group]
 
@@ -362,7 +452,7 @@ def build_connected_data(chats: List[Chat], owner: str,
     owner_stream: List[Tuple[int, str]] = []  # (ts, chat_id)
     for c in chats:
         for r in c.recs:
-            if r['sender_name'] == owner and not r['sys']:
+            if r['sender_name'] in owners and not r['sys']:
                 owner_stream.append((r['timestamp_ms'], c.chat_id))
     owner_stream.sort(key=lambda x: x[0])
 
@@ -387,7 +477,7 @@ def build_connected_data(chats: List[Chat], owner: str,
         for r in c.recs:
             if r['sys']:
                 continue
-            if r['sender_name'] == owner:
+            if r['sender_name'] in owners:
                 cell = day_cell(r['day'])
                 cell['msgs'] += 1
                 cell['hours'][r['h']] += 1
@@ -419,9 +509,9 @@ def build_connected_data(chats: List[Chat], owner: str,
     total_types: Counter = Counter()
 
     for c in dyads:
-        non_owner = [p for p in c.participants if p != owner]
+        non_owner = [p for p in c.participants if p not in owners]
         senders = Counter(r['sender_name'] for r in c.recs
-                          if r['sender_name'] != owner and not r['sys'])
+                          if r['sender_name'] not in owners and not r['sys'])
         if non_owner:
             contact_name = non_owner[0]
         elif senders:
@@ -431,7 +521,8 @@ def build_connected_data(chats: List[Chat], owner: str,
 
         ct = contacts.get(c.chat_id)
         if ct is None:
-            ct = _blank_contact(contact_name, c.chat_id)
+            ct = _blank_contact(contact_name, c.chat_id,
+                                getattr(c, 'platform', 'instagram'))
             contacts[c.chat_id] = ct
 
         real_recs = [r for r in c.recs if r['real']]
@@ -446,7 +537,7 @@ def build_connected_data(chats: List[Chat], owner: str,
                 first_ts = r['timestamp_ms']
                 ct['_first_sender'] = r['sender_name']
             last_ts = r['timestamp_ms']
-            is_owner = r['sender_name'] == owner
+            is_owner = r['sender_name'] in owners
             if is_owner:
                 ct['sent'] += 1
                 ct['emoji_sent'] += r['em']
@@ -477,11 +568,11 @@ def build_connected_data(chats: List[Chat], owner: str,
                 continue
             opener = session[0]['sender_name']
             ct['sessions'] += 1
-            if opener == owner:
+            if opener in owners:
                 ct['initiations'] += 1
 
             # session type + time-spent (attributed to start day/week/month)
-            stype, _ = classify_session(session, owner, media_ts)
+            stype, _ = classify_session(session, owners, media_ts)
             ct['session_types'][stype] += 1
             total_types[stype] += 1
             start = session[0]['timestamp_ms']
@@ -495,7 +586,7 @@ def build_connected_data(chats: List[Chat], owner: str,
             if stype == 'deep_talk':
                 deep_week[wk] += 1
 
-            owner_here = any(r['sender_name'] == owner for r in session)
+            owner_here = any(r['sender_name'] in owners for r in session)
             if owner_here:
                 dur = (end - start) / 60000.0
                 dcell = day_cell(sd.strftime('%Y-%m-%d'))
@@ -512,13 +603,13 @@ def build_connected_data(chats: List[Chat], owner: str,
                 gap = cur['timestamp_ms'] - prev['timestamp_ms']
                 if gap < 0 or gap > SESSION_GAP_MS:
                     continue
-                if cur['sender_name'] == owner:
+                if cur['sender_name'] in owners:
                     ct['_lat'].append(gap / 60000.0)
 
         for mon in ct['_months']:
             sent_by_month_contact[mon][c.chat_id] += 0  # ensure key
         for r in c.recs:
-            if r['sender_name'] == owner and not r['sys']:
+            if r['sender_name'] in owners and not r['sys']:
                 sent_by_month_contact[r['mon']][c.chat_id] += 1
 
     # attribute texting minutes/sessions per-day for groups too (owner engagement)
@@ -527,7 +618,7 @@ def build_connected_data(chats: List[Chat], owner: str,
         for session in _split_sessions(real_recs):
             if not session:
                 continue
-            if not any(r['sender_name'] == owner for r in session):
+            if not any(r['sender_name'] in owners for r in session):
                 continue
             start = session[0]['timestamp_ms']
             end = session[-1]['timestamp_ms']
@@ -563,6 +654,7 @@ def build_connected_data(chats: List[Chat], owner: str,
         latency_ok = len(lat) >= min_replies
         out = {
             'name': ct['name'], 'chat_id': ct['chat_id'],
+            'platform': ct['platform'],
             'sent': ct['sent'], 'received': ct['received'],
             'reciprocity': round(ct['sent'] / ct['received'], 3) if ct['received'] else None,
             'emoji_sent': ct['emoji_sent'], 'media_sent': ct['media_sent'],
@@ -595,24 +687,28 @@ def build_connected_data(chats: List[Chat], owner: str,
 
     # ---- leaderboards ---- #
     ungated = [c for c in contact_list if not c['gated']]
-    by_sent = [{'name': c['name'], 'sent': c['sent'],
+    by_sent = [{'name': c['name'], 'platform': c['platform'], 'sent': c['sent'],
                 'share': round(c['sent'] / total_sent, 4) if total_sent else 0.0}
                for c in contact_list[:25]]
     attention_hierarchy = sorted(
-        ({'name': c['name'], 'reply_latency_median_min': c['reply_latency_median_min'],
+        ({'name': c['name'], 'platform': c['platform'],
+          'reply_latency_median_min': c['reply_latency_median_min'],
           'reply_n': c['reply_n']} for c in contact_list if c['latency_gated']),
         key=lambda x: x['reply_latency_median_min'])
     openness = sorted(
-        ({'name': c['name'], 'words_per_turn': c['words_per_turn'],
+        ({'name': c['name'], 'platform': c['platform'],
+          'words_per_turn': c['words_per_turn'],
           'question_rate': c['question_rate'], 'i_word_rate': c['i_word_rate'],
           'pos_rate': c['pos_rate']} for c in ungated),
         key=lambda x: x['words_per_turn'], reverse=True)
     initiation = sorted(
-        ({'name': c['name'], 'initiation_share': c['initiation_share'],
+        ({'name': c['name'], 'platform': c['platform'],
+          'initiation_share': c['initiation_share'],
           'sessions': c['sessions']} for c in ungated),
         key=lambda x: x['initiation_share'], reverse=True)
     night = sorted(
-        ({'name': c['name'], 'night_share': c['night_share'],
+        ({'name': c['name'], 'platform': c['platform'],
+          'night_share': c['night_share'],
           'night_msgs': c['night_msgs']} for c in contact_list if c['night_msgs']),
         key=lambda x: x['night_share'], reverse=True)
     recip = [c for c in ungated if c['reciprocity'] is not None]
@@ -620,7 +716,8 @@ def build_connected_data(chats: List[Chat], owner: str,
     recip_deficit = sorted(recip, key=lambda x: x['reciprocity'])[:10]
 
     def _recip_row(c):
-        return {'name': c['name'], 'reciprocity': c['reciprocity'],
+        return {'name': c['name'], 'platform': c['platform'],
+                'reciprocity': c['reciprocity'],
                 'sent': c['sent'], 'received': c['received']}
 
     # ================= A  merged timeline / attention ==================== #
@@ -636,10 +733,10 @@ def build_connected_data(chats: List[Chat], owner: str,
     active_month, churn_month, react_month = _portfolio_dynamics(contact_months, all_months)
 
     # ================= E  new-contact funnel ============================= #
-    funnel = _funnel(contacts, owner, timezone)
+    funnel = _funnel(contacts, owners, timezone)
 
     # ================= groups lane ======================================= #
-    groups_lane = _groups_lane(groups, owner, timezone)
+    groups_lane = _groups_lane(groups, owners, timezone)
 
     # ---- monthly / weekly rollups ---- #
     monthly = {
@@ -674,7 +771,9 @@ def build_connected_data(chats: List[Chat], owner: str,
     n_days_active = sum(1 for d in daily_out.values() if d['sessions'])
 
     payload = {
-        'owner': owner,
+        'owner': owner_label,
+        'variant': variant,
+        'platforms': platforms,
         'generated_at': datetime.now().astimezone().isoformat(timespec='seconds'),
         'timezone': timezone,
         'range': {'first_day': days[0] if days else None,
@@ -698,7 +797,8 @@ def build_connected_data(chats: List[Chat], owner: str,
             'avg_word_len_variance': _variance(wordlen_vals),
             'lang_variance': _variance(lang_geo_vals),
             'per_contact': [
-                {'name': c['name'], 'emoji_rate': c['style']['emoji_rate'],
+                {'name': c['name'], 'platform': c['platform'],
+                 'emoji_rate': c['style']['emoji_rate'],
                  'avg_word_len': c['style']['avg_word_len'],
                  'lang_mix': c['style']['lang_mix'], 'mirror_score': c['mirror_score']}
                 for c in ungated
@@ -731,9 +831,10 @@ def build_connected_data(chats: List[Chat], owner: str,
     return payload
 
 
-def _blank_contact(name: str, chat_id: str) -> Dict[str, Any]:
+def _blank_contact(name: str, chat_id: str,
+                   platform: str = 'instagram') -> Dict[str, Any]:
     return {
-        'name': name, 'chat_id': chat_id,
+        'name': name, 'chat_id': chat_id, 'platform': platform,
         'sent': 0, 'received': 0, 'emoji_sent': 0, 'media_sent': 0,
         'sessions': 0, 'initiations': 0, 'night_msgs': 0,
         'session_types': Counter(),
@@ -856,8 +957,9 @@ def _index_to_month(idx: int) -> str:
     return f'{y:04d}-{m:02d}'
 
 
-def _funnel(contacts: Dict[str, Any], owner: str, timezone: str) -> Dict[str, Any]:
+def _funnel(contacts: Dict[str, Any], owner: Any, timezone: str) -> Dict[str, Any]:
     """E. new-contact funnel + retention."""
+    owners = _owner_set(owner)
     new_per_month: Dict[str, Dict[str, int]] = {}
     stages = {'met': 0, 'talked_again': 0, 'recurring': 0}
     retention = {'survived_3_sessions': 0, 'active_30d': 0, 'active_90d': 0}
@@ -882,7 +984,7 @@ def _funnel(contacts: Dict[str, Any], owner: str, timezone: str) -> Dict[str, An
         row = new_per_month.setdefault(mon, {'total': 0, 'owner_first': 0, 'contact_first': 0})
         row['total'] += 1
         # who texted first = sender of the earliest non-system message.
-        if ct['_first_sender'] == owner:
+        if ct['_first_sender'] in owners:
             row['owner_first'] += 1
         else:
             row['contact_first'] += 1
@@ -891,24 +993,30 @@ def _funnel(contacts: Dict[str, Any], owner: str, timezone: str) -> Dict[str, An
             'stages': stages, 'retention': retention}
 
 
-def _groups_lane(groups: List[Chat], owner: str, timezone: str) -> Dict[str, Any]:
-    """Small separate lane: time/messages in groups (never pollutes contacts)."""
+def _groups_lane(groups: List[Chat], owner: Any, timezone: str) -> Dict[str, Any]:
+    """Small separate lane: time/messages in groups (never pollutes contacts).
+
+    Aggregates groups across every platform present; each group row carries its
+    ``platform`` so the merged view can badge it.
+    """
+    owners = _owner_set(owner)
     per_group = []
     total_owner = total_all = 0
     total_min = 0.0
     for c in groups:
-        owner_msgs = sum(1 for r in c.recs if r['sender_name'] == owner and not r['sys'])
+        owner_msgs = sum(1 for r in c.recs if r['sender_name'] in owners and not r['sys'])
         all_msgs = sum(1 for r in c.recs if not r['sys'])
         real_recs = [r for r in c.recs if r['real']]
         minutes = 0.0
         for session in _split_sessions(real_recs):
-            if session and any(r['sender_name'] == owner for r in session):
+            if session and any(r['sender_name'] in owners for r in session):
                 minutes += (session[-1]['timestamp_ms'] - session[0]['timestamp_ms']) / 60000.0
         total_owner += owner_msgs
         total_all += all_msgs
         total_min += minutes
         per_group.append({
             'name': c.name, 'chat_id': c.chat_id,
+            'platform': getattr(c, 'platform', 'instagram'),
             'messages_owner': owner_msgs, 'messages_total': all_msgs,
             'members': len(c.participants), 'texting_minutes': round(minutes, 1),
         })
@@ -928,17 +1036,27 @@ def _escape_script(text: str) -> str:
     return _SCRIPT_RE.sub(r'<\\/script', text)
 
 
-def dump_connected_js(payload: Dict[str, Any]) -> str:
-    body = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
-    return f'window.CONNECTED = {_escape_script(body)};\n'
+def dump_connected_js(payload: Dict[str, Any], variant: str) -> str:
+    """Serialize a variant payload as a lazy ``window.CONNECTED_V`` assignment.
+
+    Each variant file registers itself into the shared ``window.CONNECTED_V``
+    map keyed by variant name, so the dashboard can lazy-load one variant at a
+    time without clobbering the others.
+    """
+    body = _escape_script(json.dumps(payload, ensure_ascii=False,
+                                     separators=(',', ':')))
+    return ('window.CONNECTED_V = window.CONNECTED_V || {};\n'
+            f'window.CONNECTED_V[{json.dumps(variant)}] = {body};\n')
 
 
-def write_outputs(payload: Dict[str, Any], dash_dir: str) -> Tuple[Path, Path]:
+def write_variant_outputs(payload: Dict[str, Any], dash_dir: str,
+                          variant: str) -> Tuple[Path, Path]:
+    """Write ``connected_<variant>.js`` + ``connected_<variant>.json``."""
     data_dir = Path(dash_dir) / 'data'
     data_dir.mkdir(parents=True, exist_ok=True)
-    js_path = data_dir / 'connected.js'
-    json_path = data_dir / 'connected.json'
-    js_path.write_text(dump_connected_js(payload), encoding='utf-8')
+    js_path = data_dir / f'connected_{variant}.js'
+    json_path = data_dir / f'connected_{variant}.json'
+    js_path.write_text(dump_connected_js(payload, variant), encoding='utf-8')
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
                          encoding='utf-8')
     return js_path, json_path

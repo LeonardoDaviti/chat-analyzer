@@ -72,9 +72,62 @@ dashboard shows all your chats side by side with a platform filter.
 
 ---
 
-## Step 2 — Set up the tool
+## Easiest way — download and run (no Python needed)
 
-You only do this part once.
+If you just want your results without touching a terminal, use the ready-made
+app. It bundles everything, so there is nothing to install.
+
+1. Go to the project's **Releases** page:
+   **https://github.com/LeonardoDaviti/chat-analyzer/releases**
+2. Download the file for your computer:
+   - **Windows** → `ChatAnalyzer-windows.exe`
+   - **Mac with Apple chip** (M1/M2/M3/M4) → `ChatAnalyzer-macos-arm64`
+   - **Older Intel Mac** → `ChatAnalyzer-macos-intel`
+   - **Linux** → build it yourself with the manual way below (a prebuilt Linux
+     binary may not be attached to every release).
+3. **Double-click it.** A small black window appears and your web browser opens
+   by itself to a local page. (If the browser doesn't open, the black window
+   prints an address like `http://127.0.0.1:8347/` — copy that into your
+   browser.)
+4. On that page, **drag your Instagram or Telegram ZIP onto the drop zone** (or
+   click to pick the file, or paste the path to the file/folder). The tool
+   imports it, analyzes every chat with a live progress bar, and when it's done
+   the same page turns into your dashboard. To add more chats later, click the
+   **➕ Add chats** button in the corner.
+
+Everything still runs 100% on your own computer — the little web page is just
+the app's screen; nothing is uploaded.
+
+### A one-time "are you sure?" warning (and why it's harmless)
+
+These apps are **free and unsigned** — we don't pay Apple or Microsoft for a
+code-signing certificate. So the first time you open one, your system shows a
+scary-looking warning. This is expected. Here's how to get past it:
+
+- **Windows — "Windows protected your PC" (SmartScreen):**
+  1. Click the small **More info** link in that blue box.
+  2. Click the **Run anyway** button that appears.
+
+- **macOS — "cannot be opened because it is from an unidentified developer"
+  (Gatekeeper):**
+  1. In Finder, **right-click** (or Control-click) the downloaded file and
+     choose **Open**.
+  2. In the dialog, click **Open** again. You only have to do this once.
+  - If that still won't open it, open the **Terminal** app and run
+    `xattr -d com.apple.quarantine ` followed by a space and then drag the
+    downloaded file onto the Terminal window, then press Enter. Now double-click
+    the file normally.
+
+If you would rather not run an unsigned binary at all, that's completely fair —
+use the **manual way with Python** below instead. It does exactly the same thing
+using the plain source code you can read.
+
+---
+
+## Step 2 — Set up the tool (the manual way, with Python)
+
+This is the alternative to the download above — use it if you prefer running
+the source code yourself, or you're on Linux. You only do this part once.
 
 ### 2a. Install Python
 

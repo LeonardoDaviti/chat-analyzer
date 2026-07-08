@@ -209,7 +209,7 @@ var DATA = window.DASHBOARD_DATA = window.DASHBOARD_DATA || {};
 
 var state = {
   chatId:null, chat:null, isGroup:false,
-  isConnected:false, connected:null,   // owner cross-chat ("You — Connected") mode
+  isConnected:false, connected:null, connectedVariant:'all', // owner cross-chat ("You — Connected") mode
   users:[null,null],
   fullStart:null, fullEnd:null,   // Date objects (chat extent)
   start:null, end:null,           // Date objects (active range)
@@ -1746,7 +1746,7 @@ function rerender(){
 
 /* ============================================================ *
  * CONNECTED (owner) mode — "👤 You — Connected"
- * Renders window.CONNECTED (built by build_connected.py): the owner's
+ * Renders window.CONNECTED_V[variant] (built by build_connected.py): the owner's
  * cross-chat profile. Range-scoped charts derive from the flat per-day
  * owner table; leaderboards/funnel/code-switching are all-time.
  * ============================================================ */
@@ -1804,7 +1804,8 @@ function connWeekKeys(series){ // weekly keys whose week overlaps the active ran
 function renderSkeletonConnected(){
   var owner=state.connected.owner||'You';
   el('app').innerHTML =
-  section('Pulse — '+owner+' across every chat','<div class="grid kpis" id="kpiRow"></div>')
+  '<div class="section" style="padding-bottom:0"><div id="connVariantNote" class="sub" style="font-size:13px"></div></div>'
+  + section('Pulse — '+owner+' across every chat','<div class="grid kpis" id="kpiRow"></div>')
   + section('Attention & texting span',
       '<div class="grid cols-2">'
       + card('Time spent texting','Sum of conversation-session minutes you took part in, any chat (per bucket)','<div class="chart" id="cxTexting"></div>')
@@ -1841,11 +1842,33 @@ function renderSkeletonConnected(){
       card('Group chats','Kept separate so groups never pollute the contact rankings (all-time)','<div id="connGroupsBox" style="min-height:80px"></div>'));
 }
 
+/* Prepend the platform badge to a leaderboard/contact row name in the merged
+   ('all') variant, matching the chat-picker badges (📸 / ✈️). */
+function connLabel(r){
+  return (state.connectedVariant==='all'&&r&&r.platform)
+    ? pfBadge(r.platform)+' '+r.name : (r?r.name:'');
+}
+function renderConnVariantNote(){
+  var box=el('connVariantNote'); if(!box) return;
+  var v=state.connectedVariant, plats=(state.connected.platforms||[]);
+  var lbl=CONN_VARIANT_LBL[v]||v;
+  var badges=plats.map(function(p){return pfBadge(p);}).join(' ');
+  var h='<b>Showing: '+esc(lbl)+'</b> '+badges;
+  if(v==='all'){
+    h+=' · Cross-platform attention: bursts, parallel-texting and chat-switches '
+      +'span both platforms (switching an Instagram chat → a Telegram chat counts as a switch). '
+      +'<span class="faint">Contacts are not merged across platforms — someone you talk to on both appears twice, once per platform (badge shown).</span>';
+  } else {
+    h+=' · single-platform owner profile.';
+  }
+  box.innerHTML=h;
+}
 function renderAllConnected(){
   if(!state.connected) return;
   var b=connBuckets();
   var rt=connRangeTotals(state.start,state.end);
   var has=b.starts.length>0;
+  safe(renderConnVariantNote,'cvnote');
   safe(function(){renderConnKPIs(rt,has);},'ckpi');
   safe(function(){renderConnTexting(b);},'ctexting');
   safe(function(){renderConnBursts(b);},'cbursts');
@@ -2022,27 +2045,27 @@ function renderConnLeaderboards(){
   var bs=(lb.by_sent_share||[]).slice(0,12);
   var covered=0; bs.forEach(function(r){covered+=r.sent;});
   var totSent=(c.totals||{}).messages_sent||0;
-  var rows=bs.map(function(r){return {name:r.name,v:r.share,tip:fmtNum(r.sent)+' messages'};});
+  var rows=bs.map(function(r){return {name:connLabel(r),v:r.share,tip:fmtNum(r.sent)+' messages'};});
   if(totSent>covered) rows.push({name:'Others',v:(totSent-covered)/totSent,
     tip:fmtNum(totSent-covered)+' messages',c:OTHERS_COLOR});
   rows.sort(function(a,b){return b.v-a.v;});
   connHBar('cxSentL',rows,function(v){return fmtPct(v,1);});
   // Attention hierarchy — fastest first (ascending latency).
   var ah=(lb.attention_hierarchy||[]).slice(0,12).map(function(r){
-    return {name:r.name,v:r.reply_latency_median_min,tip:fmtNum(r.reply_n)+' replies (≥50 gate)'};});
+    return {name:connLabel(r),v:r.reply_latency_median_min,tip:fmtNum(r.reply_n)+' replies (≥50 gate)'};});
   ah.reverse(); // connHBar re-reverses: fastest ends up on top
   connHBar('cxLatL',ah,function(v){return fmtDur(v);});
   // Initiation asymmetry.
   connHBar('cxInitL',(lb.initiation||[]).slice(0,12).map(function(r){
-    return {name:r.name,v:r.initiation_share,tip:fmtNum(r.sessions)+' sessions'};}),
+    return {name:connLabel(r),v:r.initiation_share,tip:fmtNum(r.sessions)+' sessions'};}),
     function(v){return fmtPct(v);});
   // Night ownership.
   connHBar('cxNightL',(lb.night||[]).slice(0,12).map(function(r){
-    return {name:r.name,v:r.night_share,tip:fmtNum(r.night_msgs)+' night messages'};}),
+    return {name:connLabel(r),v:r.night_share,tip:fmtNum(r.night_msgs)+' night messages'};}),
     function(v){return fmtPct(v,1);});
   // Openness (words per turn).
   connHBar('cxOpenL',(lb.openness||[]).slice(0,12).map(function(r){
-    return {name:r.name,v:r.words_per_turn,
+    return {name:connLabel(r),v:r.words_per_turn,
       tip:'questions '+fmtPct(r.question_rate,1)+' · I-words '+fmtPct(r.i_word_rate,1)
         +' · positivity '+fmtPct(r.pos_rate,1)};}),
     function(v){return fmtNum(v);});
@@ -2051,7 +2074,7 @@ function renderConnLeaderboards(){
   pc.sort(function(a,b){return (b.mirror_score||0)-(a.mirror_score||0);});
   var h='<div class="nlp-label">You mirror most</div>';
   pc.slice(0,6).forEach(function(r){
-    h+='<span class="tag hot">'+esc(r.name)+'<span class="n">'+fmtPct(r.mirror_score,0)+'</span></span>';});
+    h+='<span class="tag hot">'+esc(connLabel(r))+'<span class="n">'+fmtPct(r.mirror_score,0)+'</span></span>';});
   h+='<div class="nlp-label">Style variance across contacts</div>'
     +'<div class="vocab-line">emoji rate '+fmtNum(cs.emoji_rate_variance)
     +' · word length '+fmtNum(cs.avg_word_len_variance)
@@ -2096,7 +2119,7 @@ function renderConnRecip(){
   function rows(list,label){
     var s='<div class="nlp-label">'+esc(label)+'</div>';
     (list||[]).slice(0,5).forEach(function(x){
-      s+='<div class="vocab-line">'+esc(x.name)+' — ratio '+fmtNum(x.reciprocity)
+      s+='<div class="vocab-line">'+esc(connLabel(x))+' — ratio '+fmtNum(x.reciprocity)
         +' <span class="faint">(sent '+fmtNum(x.sent)+' / recv '+fmtNum(x.received)+')</span></div>';});
     return s;
   }
@@ -2147,7 +2170,7 @@ function renderConnGroups(){
     +'</b> of '+fmtNum(g.messages_total)+' messages · '+fmtDur(g.texting_minutes)+' of group texting</div>'
     +'<table class="lt-table"><tr><th>Group</th><th>Members</th><th>Your msgs</th><th>Total</th><th>Time</th></tr>';
   (g.per_group||[]).slice(0,10).forEach(function(x){
-    h+='<tr><td>'+esc(x.name)+'</td><td class="num">'+fmtNum(x.members)
+    h+='<tr><td>'+esc(connLabel(x))+'</td><td class="num">'+fmtNum(x.members)
       +'</td><td class="num">'+fmtNum(x.messages_owner)+'</td><td class="num">'+fmtNum(x.messages_total)
       +'</td><td class="num">'+fmtDur(x.texting_minutes)+'</td></tr>';});
   h+='</table>';
@@ -2285,10 +2308,12 @@ function togglePlatform(p){
   if(selectedPlatforms.size===0) selectedPlatforms=null;
   buildPlatformFilter();
   buildChatDropdown(el('chatSearch')?el('chatSearch').value:'');
+  // In connected mode the platform chips pick the CONNECTED variant instead of
+  // filtering the chat list — reload the matching variant in place.
+  if(state.isConnected){ selectConnected(); return; }
   // If the current chat is now filtered out, jump to the first visible one.
-  // (The pinned connected view is platform-independent — never kicked out.)
   var vis=visibleManifest();
-  if(vis.length && !state.isConnected && !vis.some(function(m){return m.id===state.chatId;})){
+  if(vis.length && !vis.some(function(m){return m.id===state.chatId;})){
     selectChat(vis[0].id);
   }
 }
@@ -2336,30 +2361,50 @@ function selectChat(id){
 }
 /* ---------- connected (owner) mode entry ---------- */
 var CONNECTED_ID='__connected';
+var CONN_VARIANT_LBL={all:'All platforms',instagram:'Instagram',telegram:'Telegram'};
+/* Variant is driven by the existing platform filter chips while in connected
+   mode: no filter / both platforms -> 'all'; only Instagram -> 'instagram';
+   only Telegram -> 'telegram'. */
+function connectedVariant(){
+  if(!selectedPlatforms||!selectedPlatforms.size) return 'all';
+  if(selectedPlatforms.size===1){
+    if(selectedPlatforms.has('telegram')) return 'telegram';
+    if(selectedPlatforms.has('instagram')) return 'instagram';
+  }
+  return 'all';
+}
 function selectConnected(){
   txt(el('chatBtnLabel'),'👤 You — Connected');
   state.chatId=CONNECTED_ID;
-  if(window.CONNECTED){ onConnectedLoaded(); return; }
+  loadConnectedVariant(connectedVariant());
+}
+function loadConnectedVariant(v){
+  window.CONNECTED_V=window.CONNECTED_V||{};
+  if(window.CONNECTED_V[v]){ onConnectedLoaded(v); return; }
   var s=document.createElement('script');
-  s.src='data/connected.js';
-  s.onload=function(){ onConnectedLoaded(); };
-  s.onerror=function(){ connectedMissing(); };
+  s.src='data/connected_'+v+'.js';
+  s.onload=function(){ onConnectedLoaded(v); };
+  s.onerror=function(){ connectedMissing(v); };
   document.body.appendChild(s);
 }
-function connectedMissing(){
+function connectedMissing(v){
   disposeCharts();
-  state.isConnected=false; state.connected=null; state.chat=null;
+  state.isConnected=true; state.connected=null; state.chat=null;
+  state.connectedVariant=v;
+  var lbl=CONN_VARIANT_LBL[v]||v;
   el('app').innerHTML='<div class="card" style="margin-top:26px;text-align:center;padding:40px 20px">'
-    +'<h3 style="margin-bottom:8px">👤 You — Connected is not built yet</h3>'
-    +'<div class="sub" style="font-size:13px">This view merges every Instagram chat into one owner profile.<br>'
+    +'<h3 style="margin-bottom:8px">👤 You — Connected · '+esc(lbl)+' is not built yet</h3>'
+    +'<div class="sub" style="font-size:13px">This view merges your chats into one owner profile.<br>'
     +'Generate it once with:<br><br>'
     +'<code style="background:var(--panel-2);border:1px solid var(--border);border-radius:6px;padding:6px 12px;display:inline-block">python build_connected.py</code>'
-    +'<br><br>…then rebuild or just reload this page.</div></div>';
+    +'<br><br>…then rebuild or just reload this page.<br>'
+    +'<span class="faint">(Switch the Platform filter to pick a different variant.)</span></div></div>';
 }
-function onConnectedLoaded(){
-  var c=window.CONNECTED;
-  if(!c||!c.daily){ connectedMissing(); return; }
+function onConnectedLoaded(v){
+  var c=(window.CONNECTED_V||{})[v];
+  if(!c||!c.daily){ connectedMissing(v); return; }
   disposeCharts();
+  state.connectedVariant=v;
   state.connected=c; state.isConnected=true;
   state.chat=null; state.isGroup=false; state.users=[c.owner||'You',null];
   var dates=Object.keys(c.daily).sort();

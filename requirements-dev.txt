@@ -1,0 +1,4 @@
+# Development / build tooling (NOT needed to run the analyzer from source).
+#   pip install -r requirements-dev.txt
+pytest>=7.0
+pyinstaller>=6.0

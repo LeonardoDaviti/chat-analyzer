@@ -32,3 +32,8 @@ group_chat_schema_report.md
 V3_METRICS_IMPLEMENTATION_PLAN.md
 # All dev docs (development-only, never public)
 docs/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec.bak

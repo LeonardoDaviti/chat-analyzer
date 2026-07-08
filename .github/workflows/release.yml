@@ -1,0 +1,54 @@
+name: Build release binaries
+
+# Tag a release (e.g. `git tag v1.0.0 && git push --tags`) to build the
+# double-clickable binaries for each OS and attach them to the GitHub Release.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset: ChatAnalyzer-windows.exe
+            built: dist/ChatAnalyzer.exe
+          - os: macos-latest        # Apple Silicon (arm64)
+            asset: ChatAnalyzer-macos-arm64
+            built: dist/ChatAnalyzer
+          - os: macos-13            # Intel
+            asset: ChatAnalyzer-macos-intel
+            built: dist/ChatAnalyzer
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Build onefile binary
+        run: pyinstaller chat-analyzer.spec
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          mkdir -p out
+          cp "${{ matrix.built }}" "out/${{ matrix.asset }}"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/${{ matrix.asset }}

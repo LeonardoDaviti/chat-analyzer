@@ -6,12 +6,16 @@ chat-switch / fragmentation), session portfolio typing, contact leaderboards,
 portfolio dynamics (Gini / churn), the new-contact funnel, and the groups lane.
 """
 
+import json
+from pathlib import Path
+
 import pytest
 
 from src.connected_export import (
     reduce_message, Chat, build_connected_data,
     classify_session, _gini, _split_sessions,
-    dump_connected_js,
+    dump_connected_js, write_variant_outputs,
+    discover_telegram_chats, load_telegram_chat,
 )
 
 TZ = "Asia/Tbilisi"
@@ -37,7 +41,8 @@ def msg(ts, sender, content="hi there friend", media=False, question=False):
     return m
 
 
-def make_chat(chat_id, participants, raw_msgs, taken=None):
+def make_chat(chat_id, participants, raw_msgs, taken=None, platform="instagram",
+              is_group=None):
     taken = taken if taken is not None else set()
     recs = [reduce_message(m, TZ) for m in raw_msgs]
     recs.sort(key=lambda r: r["timestamp_ms"])
@@ -45,8 +50,10 @@ def make_chat(chat_id, participants, raw_msgs, taken=None):
     c.chat_id = chat_id
     c.name = chat_id
     c.participants = participants
-    c.is_group = len(participants) >= 3
+    c.is_group = (len(participants) >= 3) if is_group is None else bool(is_group)
     c.recs = recs
+    c.thread_path = ""
+    c.platform = platform
     return c
 
 
@@ -251,13 +258,169 @@ def test_groups_excluded_from_contacts():
     assert p["totals"]["groups"] == 1
 
 
-def test_dump_js_neutralises_script_and_is_assignable():
+def test_dump_js_neutralises_script_and_registers_variant():
     c = make_chat("a", [OWNER, "A"], [msg(BASE, OWNER), msg(BASE + MIN, "A")])
-    p = build_connected_data([c], OWNER, TZ, min_msgs=0, min_replies=0)
-    js = dump_connected_js(p)
-    assert js.startswith("window.CONNECTED = ")
+    p = build_connected_data([c], OWNER, TZ, min_msgs=0, min_replies=0,
+                             variant="instagram")
+    js = dump_connected_js(p, "instagram")
+    assert "window.CONNECTED_V = window.CONNECTED_V || {}" in js
+    assert 'window.CONNECTED_V["instagram"] =' in js
     assert js.rstrip().endswith(";")
     assert "</script" not in js.lower()
+
+
+# --------------------------------------------------------------------------- #
+# Telegram + multi-variant (per-platform / merged 'all')
+# --------------------------------------------------------------------------- #
+
+def _tg_msg(ts_ms, sender, text="hi there friend"):
+    return {"type": "message", "date_unixtime": str(ts_ms // 1000),
+            "from": sender, "from_id": "user_" + sender, "text": text}
+
+
+def _write_tg_export(base_dir, folder, name, chat_type, msgs, chat_id="42"):
+    d = Path(base_dir) / "Telegram" / folder
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "result.json").write_text(json.dumps(
+        {"name": name, "type": chat_type, "id": chat_id, "messages": msgs}),
+        encoding="utf-8")
+    return d
+
+
+def _write_ig_chat(base_dir, folder, title, participants, msgs, thread_path):
+    inbox = (Path(base_dir) / "Instagram" / "exp" /
+             "your_instagram_activity" / "messages" / "inbox" / folder)
+    inbox.mkdir(parents=True, exist_ok=True)
+    norm = {"title": title, "thread_path": thread_path,
+            "participants": [{"name": p} for p in participants], "messages": msgs}
+    (inbox / "normalized.json").write_text(json.dumps(norm), encoding="utf-8")
+    return inbox
+
+
+def test_discover_and_load_telegram_chat(tmp_path):
+    _write_tg_export(tmp_path, "DAV", "Davo",
+                     "personal_chat",
+                     [_tg_msg(BASE + i * MIN, "Davidus" if i % 2 == 0 else "Davo")
+                      for i in range(6)])
+    dirs = discover_telegram_chats(str(tmp_path))
+    assert len(dirs) == 1
+    c = load_telegram_chat(dirs[0], set(), TZ)
+    assert c is not None
+    assert c.platform == "telegram"
+    assert c.is_group is False
+    assert set(c.participants) == {"Davidus", "Davo"}
+    assert len(c.recs) == 6
+
+
+def test_telegram_group_flag_routes_to_groups_lane(tmp_path):
+    # A 2-person Telegram *group* must still be treated as a group.
+    _write_tg_export(tmp_path, "GRP", "Squad", "private_group",
+                     [_tg_msg(BASE, "Davidus"), _tg_msg(BASE + MIN, "Zed")])
+    c = load_telegram_chat(discover_telegram_chats(str(tmp_path))[0], set(), TZ)
+    assert c.is_group is True
+    p = build_connected_data([c], "Davidus", TZ, min_msgs=0, min_replies=0,
+                             variant="telegram", platforms=["telegram"])
+    assert p["groups"]["count"] == 1
+    assert p["contacts"] == []
+
+
+def test_contact_platform_tagging_and_merged_dual_owner():
+    # Instagram owner "David"; Telegram owner "Davidus" — same human in 'all'.
+    ig = make_chat("ig", ["David", "Alice"], [
+        msg(BASE, "David"), msg(BASE + 2 * MIN, "David"), msg(BASE + 4 * MIN, "Alice"),
+    ], platform="instagram")
+    tg = make_chat("tg", ["Davidus", "Bob"], [
+        msg(BASE + 1 * MIN, "Davidus"), msg(BASE + 3 * MIN, "Davidus"),
+        msg(BASE + 5 * MIN, "Davidus"), msg(BASE + 6 * MIN, "Bob"),
+    ], platform="telegram")
+
+    p = build_connected_data([ig, tg], "David", TZ, min_msgs=0, min_replies=0,
+                             variant="all", platforms=["instagram", "telegram"],
+                             owner_names={"David", "Davidus"})
+    assert p["variant"] == "all"
+    assert p["platforms"] == ["instagram", "telegram"]
+    assert p["owner"] == "David"                      # normalized to IG label
+    # Both owner handles counted as owner (2 + 3 = 5 sent).
+    assert p["reciprocity"]["sent_total"] == 5
+    plats = {c["name"]: c["platform"] for c in p["contacts"]}
+    assert plats == {"Alice": "instagram", "Bob": "telegram"}
+    # Cross-platform stream: owner messages interleave IG/TG within one burst.
+    assert p["attention"]["bursts"]["count"] == 1
+    # A switch between an IG chat and a TG chat is counted.
+    assert p["attention"]["chat_switch"]["switch_fraction"] > 0
+    # Leaderboard rows carry platform for badge rendering.
+    assert all("platform" in r for r in p["leaderboards"]["by_sent_share"])
+
+
+def test_per_platform_variant_isolation():
+    ig = make_chat("ig", ["David", "Alice"],
+                   [msg(BASE, "David"), msg(BASE + MIN, "Alice")], platform="instagram")
+    p = build_connected_data([ig], "David", TZ, min_msgs=0, min_replies=0,
+                             variant="instagram", platforms=["instagram"])
+    assert p["variant"] == "instagram"
+    assert all(c["platform"] == "instagram" for c in p["contacts"])
+
+
+def test_write_variant_outputs(tmp_path):
+    c = make_chat("a", [OWNER, "A"], [msg(BASE, OWNER), msg(BASE + MIN, "A")])
+    p = build_connected_data([c], OWNER, TZ, min_msgs=0, min_replies=0,
+                             variant="telegram", platforms=["telegram"])
+    js_path, json_path = write_variant_outputs(p, str(tmp_path), "telegram")
+    assert js_path.name == "connected_telegram.js"
+    assert json_path.name == "connected_telegram.json"
+    js = js_path.read_text(encoding="utf-8")
+    assert 'window.CONNECTED_V["telegram"]' in js
+    loaded = json.loads(json_path.read_text(encoding="utf-8"))
+    assert loaded["variant"] == "telegram"
+
+
+def test_cli_builds_three_variants(tmp_path):
+    import build_connected
+    chats = tmp_path / "Chats"
+    dash = tmp_path / "Dashboard"
+    _write_ig_chat(chats, "alice", "Alice", ["David", "Alice"],
+                   [{"timestamp_ms": BASE + i * MIN,
+                     "sender_name": "David" if i % 2 == 0 else "Alice",
+                     "content": "hello there", "language": "english", "type": "text"}
+                    for i in range(6)],
+                   thread_path="inbox/alice_1")
+    _write_tg_export(chats, "DAV", "Davo", "personal_chat",
+                     [_tg_msg(BASE + i * MIN, "Davidus" if i % 2 == 0 else "Davo")
+                      for i in range(6)])
+    rc = build_connected.main([
+        "--chats-dir", str(chats), "--dash-dir", str(dash),
+        "--min-msgs", "0", "--min-replies", "0"])
+    assert rc == 0
+    data = dash / "data"
+    for v in ("instagram", "telegram", "all"):
+        assert (data / f"connected_{v}.js").exists()
+        assert (data / f"connected_{v}.json").exists()
+    allp = json.loads((data / "connected_all.json").read_text(encoding="utf-8"))
+    assert set(allp["platforms"]) == {"instagram", "telegram"}
+
+
+def test_cli_no_telegram_skips_gracefully(tmp_path):
+    import build_connected
+    chats = tmp_path / "Chats"
+    dash = tmp_path / "Dashboard"
+    _write_ig_chat(chats, "alice", "Alice", ["David", "Alice"],
+                   [{"timestamp_ms": BASE + i * MIN,
+                     "sender_name": "David" if i % 2 == 0 else "Alice",
+                     "content": "hello there", "language": "english", "type": "text"}
+                    for i in range(6)],
+                   thread_path="inbox/alice_1")
+    # No Telegram/ dir at all — telegram + all(merged from IG only) still fine.
+    rc = build_connected.main([
+        "--chats-dir", str(chats), "--dash-dir", str(dash),
+        "--min-msgs", "0", "--min-replies", "0"])
+    assert rc == 0
+    data = dash / "data"
+    assert (data / "connected_instagram.js").exists()
+    # Telegram variant skipped (no chats) → no file written.
+    assert not (data / "connected_telegram.js").exists()
+    # 'all' still built from Instagram alone.
+    allp = json.loads((data / "connected_all.json").read_text(encoding="utf-8"))
+    assert allp["platforms"] == ["instagram"]
 
 
 def test_owner_aggregate_daily_table():

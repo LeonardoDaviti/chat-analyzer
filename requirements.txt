@@ -1,5 +1,10 @@
-# Runtime dependencies
+# Runtime dependencies.
+#
+# These are ONLY needed to generate the optional PNG charts (the default
+# `python main.py`). The interactive dashboard, the launcher, and
+# `python main.py --no-visualizations` are pure standard library and need
+# nothing here. Install them only if you want the static image charts.
 matplotlib>=3.7.0
 numpy>=1.24.0
 
-# Dev / testing (not needed to run the analyzer): pytest
+# Dev / testing / building the binary: see requirements-dev.txt

@@ -165,16 +165,42 @@ try {
   }
 
   // Connected (owner) mode — pinned "You — Connected" entry.
+  // Ensure platform filter is at ALL so the default connected variant is 'all'.
+  g("selectedPlatforms=null; buildPlatformFilter();");
   g('selectConnected()'); flush();
   console.log('connected | isConnected:', g('state.isConnected'),
+    '| variant:', g('state.connectedVariant'),
     '| owner set:', g('!!(state.connected&&state.connected.owner)'),
     '| daily days:', g('state.connected?Object.keys(state.connected.daily).length:0'),
     '| charts:', g('window.__charts'), '| setOptions:', g('window.__setOptions'));
+  if (g('state.connectedVariant') !== 'all') throw new Error('default connected variant should be all');
   g("applyPreset('90')");
   console.log('connected preset OK | setOptions:', g('window.__setOptions'));
-  // Back to a normal chat: connected state must fully unwind.
+
+  // Variant switching via the platform filter while in connected mode.
+  const hasTg2 = g("MANIFEST.some(function(m){return (m.platform||'instagram')==='telegram';})");
+  if (hasTg2) {
+    g("applyPreset('all');");
+    g("togglePlatform('telegram')"); flush(); // Instagram off? no — turns telegram-only on toggle from ALL adds telegram
+    // From ALL (null), toggling telegram makes selectedPlatforms={telegram} -> telegram variant.
+    console.log('connected -> telegram | variant:', g('state.connectedVariant'),
+      '| platforms:', g('JSON.stringify((state.connected||{}).platforms)'),
+      '| isConnected:', g('state.isConnected'));
+    if (g('state.connectedVariant') !== 'telegram') throw new Error('expected telegram variant active');
+    if (!g('state.connected && state.connected.variant==="telegram"')) throw new Error('telegram payload not active');
+    // Back to ALL.
+    g("togglePlatform('telegram')"); flush();
+    console.log('connected -> back to ALL | variant:', g('state.connectedVariant'));
+    if (g('state.connectedVariant') !== 'all') throw new Error('expected all variant after reset');
+  } else {
+    console.log('single-platform manifest — connected variant switching not exercised');
+  }
+
+  // Back to a normal 1v1 chat: connected state must fully unwind.
+  g("selectedPlatforms=null; buildPlatformFilter();");
   g(`selectChat(${JSON.stringify(first)})`); flush();
   console.log('back from connected | isConnected:', g('state.isConnected'), '| isGroup:', g('state.isGroup'));
+  if (g('state.isConnected')) throw new Error('connected state did not unwind');
 } catch (e) {
   failed = true;
   console.log('SMOKE FAILED:', e.message, '\n', (e.stack || '').split('\n').slice(0, 3).join('\n'));

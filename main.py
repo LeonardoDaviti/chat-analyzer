@@ -42,9 +42,6 @@ from src.normalizer import decode_georgian_text
 from src.session_chunker import chunk_messages, get_session_statistics
 from src.session_markdown import export_sessions_to_markdown
 from src.analyzer import ChatAnalyzer
-from src.visualizer import ChatVisualizer
-from src.visualizer_v3 import AdvancedMetricsVisualizerV3
-from src.visualizer_v4 import MetricsVisualizerV4
 from src.output_manager import create_output_dir, save_json
 
 # Relative path, inside any export, to the folder that holds the per-chat dirs.
@@ -461,6 +458,19 @@ def run_chat_pipeline(
     
     # Step 5: Generate visualizations (optional — dashboard reads JSON directly)
     if not skip_visualizations:
+        # Lazy import: matplotlib lives only in the visualizer modules, so the
+        # whole pipeline (and the launcher) runs with pure stdlib unless PNG
+        # charts are actually requested. Import here, not at module top level.
+        try:
+            from src.visualizer import ChatVisualizer
+            from src.visualizer_v3 import AdvancedMetricsVisualizerV3
+            from src.visualizer_v4 import MetricsVisualizerV4
+        except ImportError as exc:
+            raise SystemExit(
+                "PNG charts need matplotlib: pip install matplotlib — "
+                "or use the dashboard instead (run with --no-visualizations). "
+                f"(import error: {exc})"
+            )
         print("\n📈 Generating visualizations...")
         viz_dir = str(output_paths['visualizations'])
         visualizer = ChatVisualizer(viz_dir)
@@ -627,6 +637,39 @@ def main():
             sys.exit(1)
         return
 
+    run_all(
+        base_dir=base_dir,
+        chat=args.chat,
+        exclude=args.exclude,
+        my_name=args.my_name,
+        output_dir=args.output_dir,
+        skip_visualizations=args.no_visualizations,
+    )
+
+
+def run_all(
+    base_dir,
+    chat: Optional[str] = None,
+    exclude: Optional[str] = None,
+    my_name: Optional[str] = None,
+    output_dir: str = 'Outputs',
+    skip_visualizations: bool = False,
+    progress_cb=None,
+) -> list:
+    """Run the full analysis over discovered chats — the callable behind ``main()``.
+
+    This is the same code path the CLI uses; ``main()`` merely parses argv and
+    delegates here. The launcher imports and calls this directly (with
+    ``skip_visualizations=True``) so it never needs matplotlib.
+
+    Args mirror the CLI flags. ``progress_cb`` is an optional callback invoked as
+    ``progress_cb(i, n, chat_name)`` before each chat is processed (i is 0-based,
+    n the total selected count) so a caller can surface live progress. Only the
+    chat NAME is passed — never message contents. Returns the list of per-chat
+    result dicts from :func:`run_chat_pipeline`.
+    """
+    base_dir = Path(base_dir)
+
     print("=" * 60)
     print("Instagram Chat Analyzer - Full Pipeline")
     print("=" * 60)
@@ -652,11 +695,11 @@ def main():
         print(f"   - [{label}] {d.split('/')[-1]}{tag}")
 
     # Filter by --chat if specified
-    if args.chat:
-        targets = [c.strip() for c in args.chat.split(',')]
+    if chat:
+        targets = [c.strip() for c in chat.split(',')]
         filtered = [(l, d) for (l, d) in discovered if any(t in d for t in targets)]
         if not filtered:
-            print(f"\n❌ No chats matching: {args.chat}")
+            print(f"\n❌ No chats matching: {chat}")
             sys.exit(1)
         selected = filtered
         print(f"\n📋 Processing {len(selected)} chat(s): {[d.split('/')[-1] for _, d in selected]}")
@@ -665,15 +708,15 @@ def main():
 
     # Exclude by --exclude if specified (substring match on directory name,
     # mirroring the --chat inclusion logic)
-    if args.exclude:
-        excludes = [c.strip() for c in args.exclude.split(',') if c.strip()]
+    if exclude:
+        excludes = [c.strip() for c in exclude.split(',') if c.strip()]
         before = len(selected)
         selected = [(l, d) for (l, d) in selected if not any(x in d for x in excludes)]
         skipped = before - len(selected)
         if skipped:
-            print(f"\n🚫 Excluded {skipped} chat(s) matching: {args.exclude}")
+            print(f"\n🚫 Excluded {skipped} chat(s) matching: {exclude}")
         if not selected:
-            print(f"\n❌ All chats were excluded by: {args.exclude}")
+            print(f"\n❌ All chats were excluded by: {exclude}")
             sys.exit(1)
 
     # Resolve account owner name: explicit override, or auto-detect PER PLATFORM
@@ -683,11 +726,11 @@ def main():
     # empty. Detection is over all discovered (not just selected) chats so
     # filtering to one chat still detects correctly.
     owner_by_platform: dict[str, Optional[str]] = {}
-    if args.my_name:
-        print(f"\n👤 Account owner: {args.my_name} (from --my-name, all platforms)")
+    if my_name:
+        print(f"\n👤 Account owner: {my_name} (from --my-name, all platforms)")
 
         def owner_for(chat_dir: str) -> Optional[str]:
-            return args.my_name
+            return my_name
     else:
         for plat in ('instagram', 'telegram'):
             dirs = [d for _, d in discovered if detect_platform(d) == plat]
@@ -705,13 +748,17 @@ def main():
 
     # Run pipeline for each chat
     results = []
-    for _label, chat_dir in selected:
+    n = len(selected)
+    for i, (_label, chat_dir) in enumerate(selected):
+        if progress_cb is not None:
+            # chat folder name only — never contents (privacy)
+            progress_cb(i, n, chat_dir.split('/')[-1])
         try:
             result = run_chat_pipeline(
                 chat_dir=chat_dir,
                 my_name=owner_for(chat_dir),
-                output_base=args.output_dir,
-                skip_visualizations=args.no_visualizations,
+                output_base=output_dir,
+                skip_visualizations=skip_visualizations,
                 platform=detect_platform(chat_dir),
             )
             results.append(result)
@@ -719,7 +766,7 @@ def main():
             print(f"\n❌ Error processing {chat_dir.split('/')[-1]}: {e}")
             import traceback
             traceback.print_exc()
-    
+
     # Summary
     print(f"\n{'='*60}")
     print("📊 FINAL SUMMARY")
@@ -731,8 +778,10 @@ def main():
     print(f"Total messages: {total_messages:,}")
     print(f"Total sessions: {total_sessions:,}")
     print(f"Total time: {total_time:.1f}s")
-    print(f"\n📍 Output location: {(base_dir / args.output_dir).absolute()}")
+    print(f"\n📍 Output location: {(base_dir / output_dir).absolute()}")
     print("=" * 60)
+
+    return results
 
 
 if __name__ == "__main__":
