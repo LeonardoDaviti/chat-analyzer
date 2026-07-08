@@ -365,7 +365,8 @@ def run_chat_pipeline(
     session_gap_hours: float = 2.0,
     min_session_messages: int = 3,
     min_session_duration_s: int = 30,
-    skip_visualizations: bool = False,
+    generate_visualizations: bool = False,
+    generate_sessions: bool = False,
     platform: Optional[str] = None,
 ) -> dict:
     """Run the full analysis pipeline for a single chat.
@@ -377,6 +378,10 @@ def run_chat_pipeline(
         session_gap_hours: Gap threshold for session splitting
         min_session_messages: Minimum messages for a valid session
         min_session_duration_s: Minimum duration (seconds) for a valid session
+        generate_visualizations: Generate PNG charts (default: False — dashboard
+            reads JSON directly; use --visuals to opt-in)
+        generate_sessions: Export per-session markdown files (default: False;
+            use --sessions to opt-in)
         
     Returns:
         Dictionary with all results and metadata
@@ -457,7 +462,7 @@ def run_chat_pipeline(
         print(f"   Response time: {my_name}={rt.get('my_avg_response_minutes', 0):.1f}min | Other={rt.get('partner_avg_response_minutes', 0):.1f}min")
     
     # Step 5: Generate visualizations (optional — dashboard reads JSON directly)
-    if not skip_visualizations:
+    if generate_visualizations:
         # Lazy import: matplotlib lives only in the visualizer modules, so the
         # whole pipeline (and the launcher) runs with pure stdlib unless PNG
         # charts are actually requested. Import here, not at module top level.
@@ -468,7 +473,7 @@ def run_chat_pipeline(
         except ImportError as exc:
             raise SystemExit(
                 "PNG charts need matplotlib: pip install matplotlib — "
-                "or use the dashboard instead (run with --no-visualizations). "
+                "or run without --visuals (the dashboard reads JSON data directly). "
                 f"(import error: {exc})"
             )
         print("\n📈 Generating visualizations...")
@@ -482,7 +487,7 @@ def run_chat_pipeline(
         visualizer_v4.generate_all(analysis, chat_name)
         print(f"   ✓ Generated 22+ charts in {viz_dir}")
     else:
-        print("\n📈 Skipping PNG charts (--no-visualizations). Dashboard reads JSON data directly.")
+        print("\n📈 Skipping PNG charts (dashboard reads JSON data directly). Use --visuals to generate.")
     
     # Step 6: Save outputs
     print("\n💾 Saving outputs...")
@@ -544,15 +549,18 @@ def run_chat_pipeline(
     
     save_json(session_analyses, output_paths['session_analyses'])
     
-    # Step 7: Export sessions as markdown files
-    print("\n📝 Exporting session markdown files...")
-    export_sessions_to_markdown(
-        sessions_path=str(output_paths['sessions']),
-        output_dir=str(output_paths['sessions_md']),
-        chat_name=chat_name,
-        min_session_messages=200,
-        my_name=my_name
-    )
+    # Step 7: Export sessions as markdown files (optional)
+    if generate_sessions:
+        print("\n📝 Exporting session markdown files...")
+        export_sessions_to_markdown(
+            sessions_path=str(output_paths['sessions']),
+            output_dir=str(output_paths['sessions_md']),
+            chat_name=chat_name,
+            min_session_messages=200,
+            my_name=my_name
+        )
+    else:
+        print("\n📝 Skipping session markdown export (use --sessions to generate).")
     
     # Step 8: Save metadata
     elapsed = time.time() - start_time
@@ -620,8 +628,12 @@ def main():
              'Run this once before analysing.'
     )
     parser.add_argument(
-        '--no-visualizations', action='store_true',
-        help='Skip PNG chart generation (faster; dashboard reads JSON data directly)'
+        '--visuals', action='store_true',
+        help='Generate PNG charts (default: skip — dashboard reads JSON data directly; use --visuals to opt-in)'
+    )
+    parser.add_argument(
+        '--sessions', action='store_true',
+        help='Export per-session markdown files (default: skip; use --sessions to opt-in)'
     )
 
     args = parser.parse_args()
@@ -643,7 +655,8 @@ def main():
         exclude=args.exclude,
         my_name=args.my_name,
         output_dir=args.output_dir,
-        skip_visualizations=args.no_visualizations,
+        generate_visualizations=args.visuals,
+        generate_sessions=args.sessions,
     )
 
 
@@ -653,14 +666,15 @@ def run_all(
     exclude: Optional[str] = None,
     my_name: Optional[str] = None,
     output_dir: str = 'Outputs',
-    skip_visualizations: bool = False,
+    generate_visualizations: bool = False,
+    generate_sessions: bool = False,
     progress_cb=None,
 ) -> list:
     """Run the full analysis over discovered chats — the callable behind ``main()``.
 
     This is the same code path the CLI uses; ``main()`` merely parses argv and
     delegates here. The launcher imports and calls this directly (with
-    ``skip_visualizations=True``) so it never needs matplotlib.
+    ``generate_visualizations=False``) so it never needs matplotlib.
 
     Args mirror the CLI flags. ``progress_cb`` is an optional callback invoked as
     ``progress_cb(i, n, chat_name)`` before each chat is processed (i is 0-based,
@@ -758,7 +772,8 @@ def run_all(
                 chat_dir=chat_dir,
                 my_name=owner_for(chat_dir),
                 output_base=output_dir,
-                skip_visualizations=skip_visualizations,
+                generate_visualizations=generate_visualizations,
+                generate_sessions=generate_sessions,
                 platform=detect_platform(chat_dir),
             )
             results.append(result)

@@ -160,7 +160,9 @@ def run_pipeline(source_path: Path, cleanup: bool = False) -> None:
         main.run_all(
             base_dir=WORK_ROOT,
             output_dir=str(WORK_ROOT / "Outputs"),
-            skip_visualizations=True,
+            # Visualizations and session markdown are skipped by default —
+            # the dashboard reads JSON directly. Use --visuals / --sessions
+            # to opt-in when running from the CLI.
             progress_cb=_cb,
         )
 
