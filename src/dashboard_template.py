@@ -132,6 +132,27 @@ select:focus,input:focus,.dd-btn:focus{border-color:var(--a)}
 .emoji-row .n{font-size:11px;color:var(--faint);letter-spacing:0;vertical-align:super;margin:0 6px 0 1px}
 .nlp-label{font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--faint);margin:10px 0 4px}
 .vocab-line{font-size:12px;color:var(--muted);margin-top:10px;font-variant-numeric:tabular-nums}
+/* findings ("insights") */
+.findings{display:grid;gap:10px}
+.finding{background:var(--panel);border:1px solid var(--border);border-radius:10px;
+  padding:12px 14px;border-left:3px solid var(--border)}
+.finding.sev-signal{border-left-color:var(--accent)}
+.finding.sev-notable{border-left-color:var(--b)}
+.finding.sev-fun{border-left-color:var(--faint)}
+.finding .f-head{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.finding .f-chip{font-size:10px;text-transform:uppercase;letter-spacing:.6px;
+  padding:2px 7px;border-radius:10px;border:1px solid var(--border);color:var(--muted)}
+.finding.sev-signal .f-chip{border-color:var(--accent);color:var(--accent)}
+.finding .f-title{font-size:13px;font-weight:600;color:var(--text)}
+.finding .f-sentence{font-size:13px;color:var(--text);line-height:1.5}
+.finding .f-foot{display:flex;align-items:center;gap:12px;margin-top:6px;flex-wrap:wrap}
+.finding .f-evidence{font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums}
+.finding .f-showme{font-size:11px;color:var(--accent);cursor:pointer;
+  background:none;border:0;padding:0}
+.finding .f-showme:hover{text-decoration:underline}
+.findings-empty{color:var(--muted);font-size:13px;font-style:italic;
+  padding:6px 2px}
+.findings-note{color:var(--faint);font-size:11px;margin-top:2px}
 </style>
 </head>
 <body data-palette="#4DB6AC,#9E9E9E">
@@ -351,7 +372,8 @@ window.addEventListener('resize',function(){ for(var k in charts){ try{charts[k]
 function renderSkeleton(){
   var A=state.users[0]||'A', B=state.users[1]||'B';
   el('app').innerHTML =
-  section('Pulse','<div class="grid kpis" id="kpiRow"></div>')
+  findingsSection()
+  + section('Pulse','<div class="grid kpis" id="kpiRow"></div>')
   + section('Story timeline',
       card('Message volume','A above the line, partner mirrored below · change-points marked',
         '<div class="chart tall" id="cVolume"></div>')
@@ -466,6 +488,81 @@ function section(title,inner){return '<div class="section"><div class="section-t
 function card(title,sub,inner){return '<div class="card"><h3>'+esc(title)+'</h3>'
   +(sub?'<div class="sub">'+esc(sub)+'</div>':'')+inner+'</div>';}
 function esc(s){var d=document.createElement('div');d.textContent=(s==null?'':String(s));return d.innerHTML;}
+
+/* ============================================================ *
+ * FINDINGS ("Insights") — lazy-loaded from data/insights.js.
+ * Precomputed all-time findings (Tier 1). Graceful when absent.
+ * ============================================================ */
+var INSIGHTS_STATE = {loaded:false, loading:false, cbs:[]};
+function ensureInsights(cb){
+  if(INSIGHTS_STATE.loaded){ cb&&cb(); return; }
+  if(cb) INSIGHTS_STATE.cbs.push(cb);
+  if(INSIGHTS_STATE.loading) return;
+  INSIGHTS_STATE.loading=true;
+  function done(){ INSIGHTS_STATE.loaded=true; INSIGHTS_STATE.loading=false;
+    var cbs=INSIGHTS_STATE.cbs; INSIGHTS_STATE.cbs=[];
+    for(var i=0;i<cbs.length;i++){ try{cbs[i]();}catch(e){} } }
+  var s=document.createElement('script');
+  s.src='data/insights.js';
+  s.onload=done;
+  s.onerror=function(){ window.INSIGHTS=window.INSIGHTS||{}; done(); };
+  document.body.appendChild(s);
+}
+function findingsSection(){
+  return section('📋 Findings','<div id="findingsBox"><div class="findings-empty">Reading the room…</div></div>');
+}
+function fEvidenceLine(f){
+  var ev=f.evidence||{}, parts=[];
+  for(var k in ev){
+    var v=ev[k];
+    if(v==null) continue;
+    if(typeof v==='object') continue; // skip nested arrays/objects
+    var key=String(k).replace(/_/g,' ');
+    parts.push(esc(key)+' '+esc(fmtNum(v)));
+  }
+  return parts.slice(0,4).join(' · ');
+}
+/* Render findings for the current scope into #findingsBox.
+   scopeKey: a chat id, or 'connected:<variant>'. */
+function renderFindings(scopeKey){
+  var box=el('findingsBox'); if(!box) return;
+  var all=window.INSIGHTS||{};
+  var list;
+  if(scopeKey.indexOf('connected:')===0){
+    var v=scopeKey.slice('connected:'.length);
+    list=((all.connected||{})[v])||[];
+  } else {
+    list=all[scopeKey]||[];
+  }
+  if(!list.length){
+    box.innerHTML='<div class="findings-empty">Nothing stands out in this window — that’s a finding too.</div>';
+    return;
+  }
+  var html='<div class="findings">';
+  for(var i=0;i<list.length;i++){
+    var f=list[i];
+    var sev=(f.severity==='signal'||f.severity==='notable'||f.severity==='fun')?f.severity:'notable';
+    var anchor=f.anchor&&el(f.anchor)?f.anchor:null;
+    html+='<div class="finding sev-'+sev+'">'
+      +'<div class="f-head"><span class="f-chip">'+esc(f.severity||'')+'</span>'
+      +'<span class="f-title">'+esc(f.title||'')+'</span></div>'
+      +'<div class="f-sentence">'+esc(f.sentence||'')+'</div>'
+      +'<div class="f-foot">'
+      +'<span class="f-evidence">'+fEvidenceLine(f)+'</span>'
+      +(anchor?'<button class="f-showme" data-anchor="'+esc(anchor)+'">show me →</button>':'')
+      +'</div></div>';
+  }
+  html+='</div><div class="findings-note">All-time findings across this chat’s full history.</div>';
+  box.innerHTML=html;
+  var btns=box.querySelectorAll?box.querySelectorAll('.f-showme'):[];
+  Array.prototype.forEach.call(btns,function(btn){
+    btn.onclick=function(){ var a=btn.getAttribute('data-anchor'); var node=el(a);
+      if(node&&node.scrollIntoView) node.scrollIntoView({behavior:'smooth',block:'center'}); };
+  });
+}
+function loadAndRenderFindings(scopeKey){
+  ensureInsights(function(){ try{ renderFindings(scopeKey); }catch(e){} });
+}
 
 /* ============================================================ *
  * RENDER: everything from active range
@@ -1805,6 +1902,7 @@ function renderSkeletonConnected(){
   var owner=state.connected.owner||'You';
   el('app').innerHTML =
   '<div class="section" style="padding-bottom:0"><div id="connVariantNote" class="sub" style="font-size:13px"></div></div>'
+  + findingsSection()
   + section('Pulse — '+owner+' across every chat','<div class="grid kpis" id="kpiRow"></div>')
   + section('Attention & texting span',
       '<div class="grid cols-2">'
@@ -2414,6 +2512,7 @@ function onConnectedLoaded(v){
   state.preset='all';
   renderSkeletonConnected();
   buildPresets(); buildMonthPicker(); syncControls();
+  loadAndRenderFindings('connected:'+v);
   if(!dates.length){ el('kpiRow').innerHTML='<div class="kpi"><div class="placeholder">No data</div></div>'; return; }
   renderAllConnected();
 }
@@ -2441,6 +2540,7 @@ function onChatLoaded(id){
   renderAll();
   renderLifetime();
   safe(renderTurnHist,'turnhist');
+  loadAndRenderFindings(id);
 }
 
 /* ---------- init ---------- */

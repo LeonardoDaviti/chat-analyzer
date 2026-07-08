@@ -277,6 +277,12 @@ pick a chat (Instagram and Telegram chats live in the same list — use the
 platform filter next to the chat picker to show only one platform), drag a
 time slider, and every panel updates. It includes:
 
+- **📋 Findings** — a short list of what actually stands out in a chat, in plain
+  sentences: "one person carries the restarts", "the last few months run
+  cooler than before", "you ask most of the questions". Each finding shows the
+  numbers behind it and a "show me →" link to the chart it came from. If nothing
+  clears the bar, it says so — silence beats a horoscope. (Connected has its own
+  Findings about you across every chat.)
 - **Pulse** — the headline numbers: total messages, who sends more, typical
   reply times, active days.
 - **Timeline** — activity over time, with automatic markers where something

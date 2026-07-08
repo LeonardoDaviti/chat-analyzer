@@ -27,9 +27,6 @@ jobs:
           - os: macos-latest         # Apple Silicon (arm64)
             asset: ChatAnalyzer-macos-arm64
             built: dist/ChatAnalyzer
-          - os: macos-13             # Intel
-            asset: ChatAnalyzer-macos-intel
-            built: dist/ChatAnalyzer
 
     steps:
       - uses: actions/checkout@v4

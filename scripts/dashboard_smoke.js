@@ -129,6 +129,31 @@ try {
   g("applyPreset('all')");
   console.log('1v1 presets OK | setOptions:', g('window.__setOptions'));
 
+  // --- Findings: 1v1 chat should lazy-load data/insights.js and render cards.
+  flush();
+  const fbox1 = byId['findingsBox'] ? byId['findingsBox']._html : '';
+  const has1 = /class="finding /.test(fbox1);
+  console.log('findings 1v1 | insightsLoaded:', g('!!window.INSIGHTS'),
+    '| lazyLoaded insights.js:', scriptsLoaded.includes('data/insights.js'),
+    '| renderedCards:', has1);
+  if (!has1) throw new Error('1v1 Findings section rendered no cards');
+
+  // --- Findings empty-state: a chat with no findings shows the empty line,
+  //     not a crash. Pick any dyad absent from window.INSIGHTS.
+  const emptyId = g("(function(){var ins=window.INSIGHTS||{};" +
+    "var m=DASHBOARD_MANIFEST.filter(function(x){return !x.is_group && !ins[x.id];})[0];" +
+    "return m?m.id:null;})()");
+  if (emptyId) {
+    g(`selectChat(${JSON.stringify(emptyId)})`); flush();
+    const fboxE = byId['findingsBox'] ? byId['findingsBox']._html : '';
+    const isEmpty = /Nothing stands out/.test(fboxE);
+    console.log('findings empty-state | chat:', emptyId, '| emptyStateShown:', isEmpty);
+    if (!isEmpty) throw new Error('finding-less chat did not show the empty state');
+    g(`selectChat(${JSON.stringify(first)})`); flush(); // back to the big chat
+  } else {
+    console.log('every dyad has findings — empty-state not exercised');
+  }
+
   // group chat (first group in manifest, if any)
   const gid = g('(DASHBOARD_MANIFEST.filter(function(m){return m.is_group;})[0]||{}).id');
   if (gid) {
@@ -176,6 +201,14 @@ try {
   if (g('state.connectedVariant') !== 'all') throw new Error('default connected variant should be all');
   g("applyPreset('90')");
   console.log('connected preset OK | setOptions:', g('window.__setOptions'));
+
+  // --- Findings: Connected view should render its own finding cards.
+  flush();
+  const fboxC = byId['findingsBox'] ? byId['findingsBox']._html : '';
+  const hasC = /class="finding /.test(fboxC) || /Nothing stands out/.test(fboxC);
+  console.log('findings connected | rendered:', hasC,
+    '| cards:', /class="finding /.test(fboxC));
+  if (!hasC) throw new Error('Connected Findings section did not render');
 
   // Variant switching via the platform filter while in connected mode.
   const hasTg2 = g("MANIFEST.some(function(m){return (m.platform||'instagram')==='telegram';})");

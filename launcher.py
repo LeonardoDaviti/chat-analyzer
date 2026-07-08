@@ -5,7 +5,7 @@ Double-clickable entry point: starts a localhost web server, opens the browser,
 shows a "drop your export" setup page, runs the whole pipeline with live
 progress, then the same tab becomes the dashboard.
 
-Pure standard library only (http.server, threading, webbrowser, json, zipfile,
+Pure standard library only (http.server, threading, json, zipfile,
 ...). matplotlib/numpy are never imported — the launcher always runs the
 analysis with ``skip_visualizations=True`` (the dashboard reads JSON directly).
 
@@ -35,7 +35,7 @@ import socket
 import sys
 import tempfile
 import threading
-import webbrowser
+
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -184,6 +184,15 @@ def run_pipeline(source_path: Path, cleanup: bool = False) -> None:
             pass
         except Exception as exc:  # connected is Instagram-only / best-effort
             print(f"connected profile skipped: {exc}")
+
+        _set_progress(stage="insights", detail="finding what stands out")
+        try:
+            import build_insights
+            build_insights.main(["--dash-dir", str(DASH_DIR)])
+        except SystemExit:
+            pass
+        except Exception as exc:  # findings are best-effort, never fatal
+            print(f"insights skipped: {exc}")
 
         _set_progress(stage="done", detail="", done=True)
     except Exception as exc:  # surface to the setup page
@@ -351,7 +360,8 @@ function poll(){if(polling)return;polling=true;const iv=setInterval(()=>{
     let pct=5;let label=p.stage;
     if(p.stage==='analyzing'&&p.n){pct=10+80*(p.i/p.n);label='Analyzing '+(p.detail||'')+' ('+p.i+'/'+p.n+')';}
     else if(p.stage==='dashboard'){pct=92;label='Building dashboard';}
-    else if(p.stage==='connected'){pct=97;label='Building your connected profile';}
+    else if(p.stage==='connected'){pct=96;label='Building your connected profile';}
+    else if(p.stage==='insights'){pct=98;label='Finding what stands out';}
     else if(p.stage==='importing'){pct=6;label='Importing '+(p.detail||'');}
     barFill.style.width=pct+'%';status.textContent=label;
   }).catch(()=>{});},700);}
@@ -553,9 +563,12 @@ def main() -> None:
     host, port = httpd.server_address[0], httpd.server_address[1]
     url = f"http://{host}:{port}/"
     print(f"Chat Analyzer running at {url}")
-    print("Open that address in your browser if it didn't open automatically.")
+    print("Paste that address into your browser.")
     print("Press Ctrl+C to stop.")
-    threading.Timer(0.4, lambda: webbrowser.open(url)).start()
+    # Don't auto-open the browser — on some desktop environments (KDE, etc.)
+    # webbrowser.open() can hang or crash when the system URL handler
+    # conflicts with the bundled libraries (e.g. OpenSSL version mismatch).
+    # Users can open the URL manually; it's a one-time copy-paste.
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

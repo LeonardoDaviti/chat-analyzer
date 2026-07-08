@@ -92,7 +92,7 @@ import main
 main.import_zip({str(zp)!r}, Path({str(home)!r}))
 res = main.run_all(base_dir={str(home)!r},
                    output_dir=str(Path({str(home)!r}) / "Outputs"),
-                   skip_visualizations=True)
+                   generate_visualizations=False)
 assert res, "no chats analysed"
 print("ANALYSED", len(res))
 """
