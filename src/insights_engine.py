@@ -34,12 +34,15 @@ MIN_SESSIONS = 60
 MIN_SIDE_EVENTS = 50        # ratios need >=50 events on both sides
 MIN_BASE_RATE = 0.02        # ratios only when both base rates >= 2%
 
-CHAT_CAP = 8
-CONNECTED_CAP = 12
+# Owner requested richer output (docs/INSIGHTS.md §2 / wave-2): caps raised from
+# 8/12 to 12/15. Design law #1 still holds — rules still gate hard.
+CHAT_CAP = 12
+CONNECTED_CAP = 15
 
 # Fields carried per user per day in the daily table (numeric, summable).
 _SUM_FIELDS = (
-    'msgs', 'words', 'chars', 'emoji', 'questions', 'night_msgs',
+    'msgs', 'words', 'chars', 'emoji', 'questions', 'questions_answered',
+    'laughs', 'night_msgs',
     'reactions_given', 'reactions_received', 'media', 'photos', 'videos',
     'voice', 'shares', 'resp_lat_sum_min', 'resp_lat_n', 'initiations',
     'turns', 'turns_answered', 'endings', 'self_restarts', 'reacted_leave',
@@ -187,6 +190,20 @@ class ChatCtx:
                     hours[i] += hh[i]
         acc['hours'] = hours
         return acc
+
+    def weekly_msgs(self) -> List[float]:
+        """Combined messages per ISO week (chronological). Used for volatility."""
+        from datetime import date
+        acc: Dict[str, float] = defaultdict(float)
+        for d in self.dates:
+            y, m, dd = (int(x) for x in d.split('-'))
+            iso = date(y, m, dd).isocalendar()
+            key = f'{iso[0]}-W{iso[1]:02d}'
+            for u in self.participants:
+                cell = self.daily.get(d, {}).get(u)
+                if cell:
+                    acc[key] += cell.get('msgs', 0) or 0
+        return [acc[k] for k in sorted(acc)]
 
     def monthly_combined(self) -> Dict[str, Dict[str, float]]:
         """Per calendar month: combined msgs/words/turns/initiations."""
@@ -738,6 +755,228 @@ def rule_media_reciprocity_gap(c: ChatCtx) -> Optional[Dict]:
     return None
 
 
+# --------------------------------------------------------------------------- #
+# Wave-2 chat rules (Part B). Windowable ones read only the daily table.
+# --------------------------------------------------------------------------- #
+
+def rule_unanswered_bids(c: ChatCtx) -> Optional[Dict]:
+    """Metric 1 — bid-response. X's questions get answered far less than Y's."""
+    a, b = c.participants
+    qa_a, q_a = c.tot[a]['questions_answered'], c.tot[a]['questions']
+    qa_b, q_b = c.tot[b]['questions_answered'], c.tot[b]['questions']
+    if q_a < 40 or q_b < 40:
+        return None
+    ra = qa_a / q_a if q_a else 0
+    rb = qa_b / q_b if q_b else 0
+    for X, Y, rx, ry in ((a, b, ra, rb), (b, a, rb, ra)):
+        if ry <= 0:
+            continue
+        if rx <= 0.6 * ry:
+            hang = 1 - rx
+            effect = min((ry - rx) / max(ry, 1e-6), 1.0)
+            sc, E, V, conf = _score(CATEGORY_WEIGHTS['dynamics'], effect, 0.6,
+                                    q_a + q_b, 100)
+            sent = (f"{_Name(Y, c.owner)} leave{'' if Y==c.owner else 's'} {_pct(hang)} of "
+                    f"{_poss(X, c.owner)} questions hanging — {_name(X, c.owner)} "
+                    f"get{'' if X==c.owner else 's'} answered far less than the other way round.")
+            return _finding('unanswered-bids', 'chat', 'dynamics', 'signal', 'asym',
+                            'Questions left hanging', sent,
+                            {'asker': X, 'answer_rate': round(rx, 3),
+                             'partner_answer_rate': round(ry, 3),
+                             'n_questions': int(q_a + q_b)},
+                            sc, conf, c.window, anchor='cQ', chat_id=c.chat_id)
+    return None
+
+
+def rule_shared_laughter(c: ChatCtx) -> Optional[Dict]:
+    """Metric 5 — warm finding: most laugh-sessions are shared."""
+    lg = c.extras.get('laughter', {}) or {}
+    total = lg.get('laugh_sessions', 0)
+    co = lg.get('co_laugh_sessions', 0)
+    if total < 30:
+        return None
+    share = co / total if total else 0
+    if share < 0.5:
+        return None
+    effect = min(share, 1.0)
+    sc, E, V, conf = _score(CATEGORY_WEIGHTS['language'], effect, 1.0, total, 30)
+    sent = (f"You laugh together: {_pct(share)} of the conversations with any laughter "
+            f"have both of you cracking up, not just one.")
+    return _finding('shared-laughter', 'chat', 'language', 'fun', 'up',
+                    'Laughing together', sent,
+                    {'co_laugh_share': round(share, 3), 'laugh_sessions': int(total)},
+                    sc, conf, c.window, anchor='cEmoji', chat_id=c.chat_id)
+
+
+def rule_laughing_alone(c: ChatCtx) -> Optional[Dict]:
+    """Metric 5 — gentle asymmetry: one person laughs alone most of the time."""
+    lg = c.extras.get('laughter', {}) or {}
+    total = lg.get('laugh_sessions', 0)
+    solo = lg.get('solo_laugh_sessions', {}) or {}
+    if total < 30:
+        return None
+    solo_total = sum(solo.values())
+    if solo_total < 15:
+        return None
+    for X in c.participants:
+        sx = solo.get(X, 0)
+        share = sx / solo_total if solo_total else 0
+        if share >= 0.75:
+            effect = min(share, 1.0)
+            sc, E, V, conf = _score(CATEGORY_WEIGHTS['language'], effect, 1.0,
+                                    solo_total, 15)
+            sent = (f"When laughter is one-sided, it's usually {_name(X, c.owner)} "
+                    f"laughing alone — {_pct(share)} of the solo-laugh moments.")
+            return _finding('laughing-alone', 'chat', 'language', 'notable', 'asym',
+                            'Laughing alone', sent,
+                            {'laugher': X, 'solo_share': round(share, 3),
+                             'solo_laugh_sessions': int(solo_total)},
+                            sc, conf, c.window, anchor='cEmoji', chat_id=c.chat_id)
+    return None
+
+
+def rule_feast_and_famine(c: ChatCtx) -> Optional[Dict]:
+    """Metric 4 — volatility: weekly-volume CV high → bursts and silences."""
+    wv = c.weekly_msgs()
+    if len(wv) < 10:
+        return None
+    mu = _mean(wv)
+    if not mu or mu <= 0:
+        return None
+    cv = _std(wv) / mu
+    if cv < 1.2:
+        return None
+    effect = min(cv / 2.0, 1.0)
+    sc, E, V, conf = _score(CATEGORY_WEIGHTS['rhythm'], effect, 1.0, c.n_msgs, MIN_MSGS)
+    sent = (f"This chat runs in bursts and silences — week-to-week volume swings wildly "
+            f"(volatility {cv:.1f}×, well above a steady rhythm).")
+    return _finding('feast-and-famine', 'chat', 'rhythm', 'notable', 'up',
+                    'Bursts and silences', sent,
+                    {'cv': round(cv, 2), 'weeks': len(wv)},
+                    sc, conf, c.window, anchor='cVolume', chat_id=c.chat_id)
+
+
+def rule_steady_drumbeat(c: ChatCtx) -> Optional[Dict]:
+    """Metric 4 — volatility: low CV over many weeks → steady rhythm."""
+    wv = c.weekly_msgs()
+    if len(wv) < 26:
+        return None
+    mu = _mean(wv)
+    if not mu or mu <= 0:
+        return None
+    cv = _std(wv) / mu
+    if cv > 0.45:
+        return None
+    effect = min((0.45 - cv) / 0.45 + 0.5, 1.0)
+    sc, E, V, conf = _score(CATEGORY_WEIGHTS['rhythm'], effect, 1.0, c.n_msgs, MIN_MSGS)
+    sent = (f"A steady drumbeat: week after week the volume barely wavers "
+            f"(volatility just {cv:.2f}) — one of your most consistent chats.")
+    return _finding('steady-drumbeat', 'chat', 'rhythm', 'fun', 'up',
+                    'A steady drumbeat', sent,
+                    {'cv': round(cv, 2), 'weeks': len(wv)},
+                    sc, conf, c.window, anchor='cVolume', chat_id=c.chat_id)
+
+
+def rule_different_clocks(c: ChatCtx) -> Optional[Dict]:
+    """Metric 7 — circadian overlap low → you live in different hours."""
+    ov = c.extras.get('circadian_overlap')
+    if ov is None or c.n_msgs < MIN_MSGS:
+        return None
+    if ov > 0.75:
+        return None
+    effect = min((0.75 - ov) / 0.75 + 0.3, 1.0)
+    sc, E, V, conf = _score(CATEGORY_WEIGHTS['rhythm'], effect, 1.0, c.n_msgs, MIN_MSGS)
+    sent = (f"You two live in different hours (clock overlap {ov:.2f}) — slow replies "
+            f"here may just be schedules, not distance.")
+    return _finding('different-clocks', 'chat', 'rhythm', 'notable', 'asym',
+                    'Different clocks', sent,
+                    {'overlap': round(ov, 3)},
+                    sc, conf, c.window, anchor='cNight', chat_id=c.chat_id)
+
+
+def rule_length_mirroring(c: ChatCtx) -> Optional[Dict]:
+    """Metric 6 — turn-length elasticity: one stretches when the other does."""
+    el = c.extras.get('turn_elasticity', {}) or {}
+    best = None
+    for u in c.participants:
+        rec = el.get(u) or {}
+        r, n = rec.get('r'), rec.get('n', 0)
+        if r is None or n < 300:
+            continue
+        if r >= 0.35 and (best is None or r > best[1]):
+            best = (u, r, n)
+    if not best:
+        return None
+    u, r, n = best
+    effect = min(r / 0.6, 1.0)
+    sc, E, V, conf = _score(CATEGORY_WEIGHTS['dynamics'], effect, 1.0, n, 300)
+    sent = (f"Message lengths move together (r={r:.2f}): when one of you writes long, "
+            f"the other stretches too — behavioral mirroring.")
+    return _finding('length-mirroring', 'chat', 'dynamics', 'notable', 'up',
+                    'Lengths in step', sent,
+                    {'r': round(r, 3), 'n_pairs': int(n), 'responder': u},
+                    sc, conf, c.window, anchor='cDepth', chat_id=c.chat_id)
+
+
+def rule_openings_that_land(c: ChatCtx) -> Optional[Dict]:
+    """Metric 2 — opening quality: one person's openings go much deeper."""
+    oq = c.extras.get('opening_quality', {}) or {}
+    a, b = c.participants
+    da = (oq.get(a) or {}).get('median_msgs')
+    db = (oq.get(b) or {}).get('median_msgs')
+    na = (oq.get(a) or {}).get('n', 0)
+    nb = (oq.get(b) or {}).get('n', 0)
+    if not da or not db or na < 25 or nb < 25:
+        return None
+    for X, Y, dx, dy in ((a, b, da, db), (b, a, db, da)):
+        if dy <= 0:
+            continue
+        if dx >= 1.8 * dy:
+            ratio = dx / dy
+            effect = min((ratio - 1) / 1.5, 1.0)
+            sc, E, V, conf = _score(CATEGORY_WEIGHTS['dynamics'], effect, 1.0,
+                                    na + nb, 60)
+            sent = (f"When {_name(X, c.owner)} start{'' if X==c.owner else 's'} the "
+                    f"conversation it goes {_x(ratio)} deeper than when "
+                    f"{_name(Y, c.owner)} do{'' if Y==c.owner else 'es'} — some openings just land.")
+            return _finding('openings-that-land', 'chat', 'dynamics', 'notable', 'asym',
+                            'Openings that land', sent,
+                            {'opener': X, 'median_depth': round(dx, 1),
+                             'partner_median_depth': round(dy, 1), 'ratio': round(ratio, 2)},
+                            sc, conf, c.window, anchor='cInit', chat_id=c.chat_id)
+    return None
+
+
+def rule_repair(c: ChatCtx) -> Optional[Dict]:
+    """Metric 3 — rupture/repair half-life: elastic vs brittle ties."""
+    rr = c.extras.get('rupture_repair', {}) or {}
+    n = rr.get('n_ruptures', 0)
+    if n < 3:
+        return None
+    med = rr.get('median_repair_weeks')
+    if med is None:
+        return None
+    if med <= 2:
+        effect = 1.0
+        sc, E, V, conf = _score(CATEGORY_WEIGHTS['dynamics'], effect, 1.0, n, 3)
+        sent = (f"This chat is elastic: after {int(n)} big drop-offs it bounced back within "
+                f"~{med:.0f} week(s) each time. Silences here don't stick.")
+        return _finding('quick-repair', 'chat', 'dynamics', 'notable', 'up',
+                        'Bounces back fast', sent,
+                        {'n_ruptures': int(n), 'median_repair_weeks': round(med, 1)},
+                        sc, conf, c.window, anchor='cVolume', chat_id=c.chat_id)
+    if med >= 6:
+        effect = min(med / 12.0, 1.0)
+        sc, E, V, conf = _score(CATEGORY_WEIGHTS['dynamics'], effect, 1.0, n, 3)
+        sent = (f"This chat is brittle: after a big drop-off it takes ~{med:.0f} weeks to "
+                f"recover ({int(n)} such ruptures). Silences here linger.")
+        return _finding('slow-repair', 'chat', 'dynamics', 'notable', 'down',
+                        'Slow to recover', sent,
+                        {'n_ruptures': int(n), 'median_repair_weeks': round(med, 1)},
+                        sc, conf, c.window, anchor='cVolume', chat_id=c.chat_id)
+    return None
+
+
 CHAT_RULES: Dict[str, Callable[[ChatCtx], Optional[Dict]]] = {
     'asymmetric-pursuit': rule_asymmetric_pursuit,
     'pursuit-withdrawal-trend': rule_pursuit_withdrawal_trend,
@@ -757,7 +996,29 @@ CHAT_RULES: Dict[str, Callable[[ChatCtx], Optional[Dict]]] = {
     'night-migration': rule_night_migration,
     'session-records': rule_session_records,
     'media-reciprocity-gap': rule_media_reciprocity_gap,
+    # wave-2
+    'unanswered-bids': rule_unanswered_bids,
+    'shared-laughter': rule_shared_laughter,
+    'laughing-alone': rule_laughing_alone,
+    'feast-and-famine': rule_feast_and_famine,
+    'steady-drumbeat': rule_steady_drumbeat,
+    'different-clocks': rule_different_clocks,
+    'length-mirroring': rule_length_mirroring,
+    'openings-that-land': rule_openings_that_land,
+    'rupture-repair': rule_repair,   # emits id quick-repair OR slow-repair
 }
+
+# Rules whose inputs live entirely in the per-day daily table, so the browser
+# can recompute them for the selected time range (docs/INSIGHTS.md §3.3). The JS
+# rule registry in dashboard_template.py MIRRORS exactly this set; the smoke
+# harness parity-checks the full-range JS output against precomputed ids. Rules
+# NOT in this set need lifetime/extras/change-points and stay all-time.
+WINDOWABLE_RULE_IDS = frozenset({
+    'question-imbalance', 'gottman-ratio', 'courtesy-asymmetry',
+    'media-reciprocity-gap', 'depth-mismatch', 'night-migration',
+    'monologue-drift', 'we-ness-shift', 'eager-waiter', 'left-on-react',
+    'unanswered-bids', 'feast-and-famine', 'steady-drumbeat',
+})
 
 
 # --------------------------------------------------------------------------- #
@@ -1111,8 +1372,89 @@ def crule_platform_persona(ig: Dict, tg: Dict) -> Optional[Dict]:
                     sc, conf, _conn_window(ig), anchor='cxFocus')
 
 
+def crule_drifting_away(p: Dict) -> Optional[Dict]:
+    """Metric 8 — attention debt: a top-volume contact you now answer >=2x slower."""
+    debt = p.get('attention_debt', []) or []
+    cand = [d for d in debt if d.get('volume_rank', 999) < 15
+            and (d.get('ratio') or 0) >= 2.0]
+    if not cand:
+        return None
+    cand.sort(key=lambda d: -(d.get('ratio') or 0))
+    d = cand[0]
+    ratio = d['ratio']
+    effect = min(ratio / 4.0, 1.0)
+    sc, E, V, conf = _score(CATEGORY_WEIGHTS['attention'], effect, 1.0, 60, 60)
+    sent = (f"You're drifting from {d['name']}: your replies there went from "
+            f"~{d['earlier_median_min']:.0f} to ~{d['recent_median_min']:.0f} min "
+            f"({_x(ratio)} slower) even though they're a top-15 chat.")
+    return _finding('drifting-away', 'connected', 'attention', 'signal', 'down',
+                    'Drifting from someone close', sent,
+                    {'contact': d['name'], 'earlier_median_min': d['earlier_median_min'],
+                     'recent_median_min': d['recent_median_min'], 'ratio': ratio},
+                    sc, conf, _conn_window(p), anchor='cxLatL')
+
+
+def crule_dormancy_resilience(p: Dict) -> Optional[Dict]:
+    """Metric 9 — elastic vs brittle ties: do revived chats recover?"""
+    dm = p.get('dormancy', {}) or {}
+    revivals = dm.get('revivals', 0)
+    share = dm.get('recover_share')
+    if revivals < 5 or share is None:
+        return None
+    if share >= 0.70:
+        effect = min(share, 1.0)
+        sc, E, V, conf = _score(CATEGORY_WEIGHTS['portfolio'], effect, 1.0, revivals, 5)
+        sent = (f"Your ties are elastic: {_pct(share)} of the {int(revivals)} chats that "
+                f"went quiet for a month came roaring back afterwards.")
+        return _finding('elastic-ties', 'connected', 'portfolio', 'notable', 'up',
+                        'Ties that bounce back', sent,
+                        {'revivals': int(revivals), 'recover_share': round(share, 3)},
+                        sc, conf, _conn_window(p), anchor='cxDyn')
+    if share <= 0.30:
+        effect = min(1.0 - share, 1.0)
+        sc, E, V, conf = _score(CATEGORY_WEIGHTS['portfolio'], effect, 1.0, revivals, 5)
+        sent = (f"Your ties are brittle: only {_pct(share)} of the {int(revivals)} chats that "
+                f"went quiet ever recovered. When they lapse, they mostly stay lapsed.")
+        return _finding('brittle-ties', 'connected', 'portfolio', 'notable', 'down',
+                        'Ties that stay lapsed', sent,
+                        {'revivals': int(revivals), 'recover_share': round(share, 3)},
+                        sc, conf, _conn_window(p), anchor='cxDyn')
+    return None
+
+
+def crule_novelty(p: Dict) -> Optional[Dict]:
+    """Metric 10 — explorer vs consolidator: share of new texting to young ties."""
+    nv = p.get('novelty', {}) or {}
+    tn = nv.get('trailing_6mo')
+    n_contacts = nv.get('n_contacts', 0)
+    if tn is None or n_contacts < 15:
+        return None
+    if tn >= 0.25:
+        effect = min(tn / 0.5, 1.0)
+        sc, E, V, conf = _score(CATEGORY_WEIGHTS['portfolio'], effect, 1.0, n_contacts, 15)
+        sent = (f"You're an explorer: {_pct(tn)} of what you've sent lately goes to "
+                f"contacts under three months old. Fresh connections keep arriving.")
+        return _finding('explorer-vs-consolidator', 'connected', 'portfolio', 'notable',
+                        'up', 'An explorer right now', sent,
+                        {'trailing_novelty': round(tn, 3), 'mode': 'explorer'},
+                        sc, conf, _conn_window(p), anchor='cxFunnel')
+    if tn <= 0.03:
+        effect = min((0.03 - tn) / 0.03 + 0.5, 1.0)
+        sc, E, V, conf = _score(CATEGORY_WEIGHTS['portfolio'], effect, 1.0, n_contacts, 15)
+        sent = (f"You're a consolidator: barely {_pct(tn)} of what you send goes to new "
+                f"faces — your attention stays with the people you already know.")
+        return _finding('explorer-vs-consolidator', 'connected', 'portfolio', 'notable',
+                        'down', 'A consolidator right now', sent,
+                        {'trailing_novelty': round(tn, 3), 'mode': 'consolidator'},
+                        sc, conf, _conn_window(p), anchor='cxFunnel')
+    return None
+
+
 CONNECTED_RULES: Dict[str, Callable[[Dict], Optional[Dict]]] = {
     'attention-volume-mismatch': crule_attention_volume_mismatch,
+    'drifting-away': crule_drifting_away,
+    'dormancy-resilience': crule_dormancy_resilience,
+    'novelty': crule_novelty,
     'concentration-trend': crule_concentration_trend,
     'span-trend': crule_span_trend,
     'churn-wave': crule_churn_wave,
@@ -1153,7 +1495,20 @@ def run_chat(chat_id: str, payload: Dict, owner: str) -> List[Dict]:
             r = None
         if r:
             out.append(r)
+    _soften_pursuit(out)
     return _rank_and_cap(out, CHAT_CAP)
+
+
+def _soften_pursuit(findings: List[Dict]) -> None:
+    """Metric 7 post-pass: if 'different-clocks' fired, the pursuit asymmetry may
+    be schedules, not chasing — cap 'asymmetric-pursuit' severity at notable."""
+    ids = {f['id'] for f in findings}
+    if 'different-clocks' not in ids:
+        return
+    for f in findings:
+        if f['id'] == 'asymmetric-pursuit' and f.get('severity') == 'signal':
+            f['severity'] = 'notable'
+            f['softened_by'] = 'different-clocks'
 
 
 def run_connected(payload: Dict,

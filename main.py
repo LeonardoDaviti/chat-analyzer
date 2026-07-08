@@ -408,7 +408,7 @@ def run_chat_pipeline(
     print(f"   Total messages: {len(data.get('messages', []))}")
     
     # Step 2: Create output directory
-    output_paths = create_output_dir(output_base, chat_name)
+    output_paths = create_output_dir(output_base, chat_name, platform=platform)
     print(f"\n📂 Output: {output_paths['base']}")
     
     # Step 3: Chunk into sessions

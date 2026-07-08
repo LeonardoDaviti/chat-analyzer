@@ -605,6 +605,12 @@ def build_connected_data(chats: List[Chat], owner: Any,
                     continue
                 if cur['sender_name'] in owners:
                     ct['_lat'].append(gap / 60000.0)
+                    ct['_lat_ts'].append(cur['timestamp_ms'])
+
+        # per-contact monthly total volume (both sides) — dormancy resilience
+        for r in c.recs:
+            if not r['sys']:
+                ct['_month_vol'][r['mon']] += 1
 
         for mon in ct['_months']:
             sent_by_month_contact[mon][c.chat_id] += 0  # ensure key
@@ -738,6 +744,79 @@ def build_connected_data(chats: List[Chat], owner: Any,
     # ================= groups lane ======================================= #
     groups_lane = _groups_lane(groups, owners, timezone)
 
+    # ================= wave-2 connected metrics (8/9/10) ================= #
+    volume_rank = {c['chat_id']: i for i, c in enumerate(contact_list)}
+
+    # 8. Attention debt: owner reply latency, recent half vs earlier half.
+    attention_debt: List[Dict[str, Any]] = []
+    for ct in contacts.values():
+        lat, ts = ct['_lat'], ct['_lat_ts']
+        pairs = sorted(zip(ts, lat))
+        half = len(pairs) // 2
+        early = [l for _, l in pairs[:half]]
+        recent = [l for _, l in pairs[half:]]
+        if len(early) < 30 or len(recent) < 30:
+            continue
+        me, mr = _median(early), _median(recent)
+        if not me:
+            continue
+        attention_debt.append({
+            'name': ct['name'], 'platform': ct['platform'],
+            'earlier_median_min': me, 'recent_median_min': mr,
+            'ratio': round(mr / me, 3) if me else None,
+            'volume_rank': volume_rank.get(ct['chat_id'], 999),
+        })
+    attention_debt.sort(key=lambda x: -(x['ratio'] or 0))
+
+    # 9. Dormancy resilience: gaps of >=1 silent month; recovery within 2 months.
+    revivals = recovered = 0
+    for ct in contacts.values():
+        mv = ct['_month_vol']
+        if not mv:
+            continue
+        idxs = sorted(_month_index(m) for m in mv)
+        by_idx = {_month_index(m): v for m, v in mv.items()}
+        active = [i for i in idxs if by_idx.get(i, 0) > 0]
+        for k in range(1, len(active)):
+            prev, cur = active[k - 1], active[k]
+            if cur - prev < 2:
+                continue  # no silent month between → not dormant
+            pre = [by_idx.get(prev - d, 0) for d in range(3)]
+            pre_avg = sum(pre) / 3.0
+            if pre_avg <= 0:
+                continue
+            revivals += 1
+            post_max = max(by_idx.get(cur, 0), by_idx.get(cur + 1, 0))
+            if post_max >= 0.5 * pre_avg:
+                recovered += 1
+    dormancy = {
+        'revivals': revivals, 'recovered': recovered,
+        'recover_share': round(recovered / revivals, 3) if revivals else None,
+    }
+
+    # 10. Novelty ratio: share of owner-sent going to contacts <90 days old.
+    first_idx = {cid: (_month_index(to_datetime(ct['_first_ts'], timezone).strftime('%Y-%m'))
+                       if ct['_first_ts'] else None)
+                 for cid, ct in contacts.items()}
+    novelty_monthly: Dict[str, float] = {}
+    for mon in all_months:
+        sent_map = sent_by_month_contact.get(mon, {})
+        total = sum(sent_map.values())
+        if not total:
+            continue
+        mi = _month_index(mon)
+        young = sum(v for cid, v in sent_map.items()
+                    if first_idx.get(cid) is not None and 0 <= mi - first_idx[cid] <= 2)
+        novelty_monthly[mon] = round(young / total, 4)
+    recent6 = sorted(novelty_monthly)[-6:]
+    trailing_novelty = (_median([novelty_monthly[m] for m in recent6])
+                        if recent6 else None)
+    novelty = {
+        'monthly': novelty_monthly,
+        'trailing_6mo': round(trailing_novelty, 4) if trailing_novelty is not None else None,
+        'n_contacts': len(contact_list),
+    }
+
     # ---- monthly / weekly rollups ---- #
     monthly = {
         'gini': gini_month,
@@ -816,6 +895,9 @@ def build_connected_data(chats: List[Chat], owner: Any,
             'new_per_month': funnel['new_per_month'],
         },
         'groups': groups_lane,
+        'attention_debt': attention_debt,
+        'dormancy': dormancy,
+        'novelty': novelty,
         'reciprocity': {
             'sent_total': total_sent, 'received_total': total_received,
             'ratio': round(total_sent / total_received, 3) if total_received else None,
@@ -838,9 +920,9 @@ def _blank_contact(name: str, chat_id: str,
         'sent': 0, 'received': 0, 'emoji_sent': 0, 'media_sent': 0,
         'sessions': 0, 'initiations': 0, 'night_msgs': 0,
         'session_types': Counter(),
-        '_lat': [], '_o_msgs': 0, '_o_words': 0, '_o_wlen': 0, '_o_q': 0,
-        '_o_i': 0, '_o_pos': 0, '_o_em': 0, '_o_lang': Counter(),
-        '_c_msgs': 0, '_c_em': 0,
+        '_lat': [], '_lat_ts': [], '_o_msgs': 0, '_o_words': 0, '_o_wlen': 0,
+        '_o_q': 0, '_o_i': 0, '_o_pos': 0, '_o_em': 0, '_o_lang': Counter(),
+        '_c_msgs': 0, '_c_em': 0, '_month_vol': Counter(),
         '_first_ts': None, '_last_ts': None, '_first_sender': None, '_months': set(),
     }
 

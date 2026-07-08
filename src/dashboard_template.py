@@ -274,7 +274,8 @@ function inRange(dateStr){
   var t=parseYMD(dateStr).getTime();
   return t>=state.start.getTime() && t<=state.end.getTime();
 }
-function blank(){return {msgs:0,words:0,chars:0,emoji:0,questions:0,night_msgs:0,
+function blank(){return {msgs:0,words:0,chars:0,emoji:0,questions:0,
+  questions_answered:0,laughs:0,night_msgs:0,
   reactions_given:0,reactions_received:0,media:0,photos:0,videos:0,voice:0,shares:0,
   turns:0,turns_answered:0,endings:0,self_restarts:0,reacted_leave:0,
   wait_reply_sum_min:0,wait_reply_n:0,resp_lat_sum_min:0,resp_lat_n:0,initiations:0,
@@ -372,8 +373,7 @@ window.addEventListener('resize',function(){ for(var k in charts){ try{charts[k]
 function renderSkeleton(){
   var A=state.users[0]||'A', B=state.users[1]||'B';
   el('app').innerHTML =
-  findingsSection()
-  + section('Pulse','<div class="grid kpis" id="kpiRow"></div>')
+  section('Pulse','<div class="grid kpis" id="kpiRow"></div>')
   + section('Story timeline',
       card('Message volume','A above the line, partner mirrored below · change-points marked',
         '<div class="chart tall" id="cVolume"></div>')
@@ -422,6 +422,7 @@ function renderSkeleton(){
   + section('Shifts vs previous period',
       card('What changed','Every metric that moved, current range compared to the previous window of equal length',
         '<div class="diff" id="shiftList"></div>'))
+  + findingsSection()
   + section('All-time lifetime metrics',
       '<div class="grid cols-2" id="ltCards"></div>');
 }
@@ -1902,7 +1903,6 @@ function renderSkeletonConnected(){
   var owner=state.connected.owner||'You';
   el('app').innerHTML =
   '<div class="section" style="padding-bottom:0"><div id="connVariantNote" class="sub" style="font-size:13px"></div></div>'
-  + findingsSection()
   + section('Pulse — '+owner+' across every chat','<div class="grid kpis" id="kpiRow"></div>')
   + section('Attention & texting span',
       '<div class="grid cols-2">'
@@ -1936,6 +1936,7 @@ function renderSkeletonConnected(){
       + card('Met → talked again → recurring','Only accepted, still-existing chats are visible — rejected or deleted requests are not (survivorship bias)','<div class="chart" id="cxFunnel"></div>')
       + card('New contacts per month','A chat’s first-ever message · split by who texted first (clipped to range)','<div class="chart" id="cxNewC"></div>')
       + '</div>')
+  + findingsSection()
   + section('Groups lane',
       card('Group chats','Kept separate so groups never pollute the contact rankings (all-time)','<div id="connGroupsBox" style="min-height:80px"></div>'));
 }

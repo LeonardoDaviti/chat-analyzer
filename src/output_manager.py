@@ -3,13 +3,14 @@ Output Manager for Instagram Chat Analysis
 
 Creates organized output directory structure:
   Outputs/
-  └── {Chat Name}/
-      └── {YYYY-MM-DD_HH-MM-SS}/
-          ├── sessions.json           # All session data
-          ├── analysis.json           # Full analysis results
-          ├── session_stats.json      # Session summary statistics
-          ├── visualizations/         # Chart images
-          └── normalized.json         # Normalized chat data (optional)
+  └── {Platform}/                  # Instagram | Telegram
+      └── {Chat Name}/
+          └── {YYYY-MM-DD_HH-MM-SS}/
+              ├── sessions.json           # All session data
+              ├── analysis.json           # Full analysis results
+              ├── session_stats.json      # Session summary statistics
+              ├── visualizations/         # Chart images
+              └── normalized.json         # Normalized chat data (optional)
 
 Usage:
     from src.output_manager import create_output_dir, get_output_paths
@@ -21,15 +22,21 @@ Usage:
 
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 
-def create_output_dir(base_dir: str, chat_name: str) -> Dict[str, Path]:
+def create_output_dir(
+    base_dir: str,
+    chat_name: str,
+    platform: Optional[str] = None,
+) -> Dict[str, Path]:
     """Create output directory structure for a chat.
     
     Args:
         base_dir: Base output directory (e.g., "Outputs")
         chat_name: Display name of the chat
+        platform: Platform slug ('instagram' | 'telegram'). When present,
+            outputs land under Outputs/{Platform}/{Chat}/{Timestamp}/.
         
     Returns:
         Dictionary with paths to all output directories and files
@@ -41,7 +48,9 @@ def create_output_dir(base_dir: str, chat_name: str) -> Dict[str, Path]:
     now = datetime.now()
     timestamp = now.strftime('%Y-%m-%d_%H-%M')
     
-    output_base = Path(base_dir) / safe_name / timestamp
+    # Platform subdirectory (e.g., Outputs/Instagram/Chat/Timestamp/)
+    platform_dir = Path(platform) if platform else Path('.')
+    output_base = Path(base_dir) / platform_dir / safe_name / timestamp
     output_base.mkdir(parents=True, exist_ok=True)
     
     # Create subdirectories

@@ -80,6 +80,28 @@ LEX_APOLOGY = {'sorry', 'apologies', 'apologize', 'sry',
                'ბოდიში', 'ბოდიშით', 'უკაცრავად', 'მაპატიე', 'მაპატიო',
                'bodishi', 'mapatie', 'ukacravad'}
 
+# Laugh detection (co-laughter metric). A message "laughs" if it contains any
+# laugh token: repeated ha/ah/he variants, romanized/Georgian xaxa & haha,
+# "kkk" (pt-BR style), lol/lmao/rofl, or a laughing emoji. Detected on the raw
+# (lowercased) content with one precompiled regex — precision over recall.
+LAUGH_RE = re.compile(
+    r'(?:a?ha){2,}'          # haha / ahaha / hahaha
+    r'|(?:he){2,}'           # hehe
+    r'|x+a+x+a+'             # xaxa (romanized Georgian)
+    r'|k{3,}'                # kkk (pt-BR laughter)
+    r'|(?:ხა){2,}'           # ხახა (Georgian)
+    r'|(?:ჰა){2,}'           # ჰაჰა (Georgian)
+    r'|\blo+l\b'             # lol / loool
+    r'|\blmf?a+o+\b'         # lmao / lmfao
+    r'|\brofl\b'
+    r'|😂|🤣',
+    re.IGNORECASE,
+)
+
+
+def _has_laugh(content: str) -> bool:
+    return bool(content) and bool(LAUGH_RE.search(content))
+
 # Simplified Language-Style-Matching categories (function words; Ireland &
 # Pennebaker). Matching on function words — not content — is what makes LSM a
 # rapport measure rather than a topic-overlap measure.
@@ -116,6 +138,11 @@ def _tokens(content: str) -> List[str]:
 def _blank_day() -> Dict[str, Any]:
     return {
         'msgs': 0, 'words': 0, 'chars': 0, 'emoji': 0, 'questions': 0,
+        # questions this user asked that the partner answered within the same
+        # session (bid-response / Gottman turning-toward). <= questions.
+        'questions_answered': 0,
+        # real messages containing a laugh token (co-laughter metric).
+        'laughs': 0,
         'night_msgs': 0, 'reactions_given': 0, 'reactions_received': 0,
         'media': 0, 'photos': 0, 'videos': 0, 'voice': 0, 'shares': 0,
         'hours': [0] * 24,
@@ -245,6 +272,8 @@ def build_daily_aggregates(messages: List[Dict[str, Any]],
             elif t in LEX_APOLOGY: c['apology'] += 1
         if _is_question(m):
             c['questions'] += 1
+        if _has_laugh(content):
+            c['laughs'] += 1
         if dt.hour in NIGHT_HOURS:
             c['night_msgs'] += 1
         if m.get('edited_ms'):        # Telegram: this message was edited
@@ -312,6 +341,18 @@ def build_daily_aggregates(messages: List[Dict[str, Any]],
             c['turns'] += 1
             if ri < len(run_starts) - 1:
                 c['turns_answered'] += 1
+
+        # Bid-response (metric 1): a question is "answered" if the partner sends
+        # any message later in the same session. Walk backwards accumulating the
+        # senders seen in the suffix; a question is answered iff the suffix holds
+        # a sender other than the asker.
+        suffix_senders: set = set()
+        for msg in reversed(session):
+            sender = msg.get('sender_name', 'Unknown')
+            if sender in user_set and _is_question(msg):
+                if any(s != sender for s in suffix_senders):
+                    cell(_day(msg), sender)['questions_answered'] += 1
+            suffix_senders.add(sender)
 
         # Endings: the final-word holder of this session.
         last = session[-1]
@@ -394,6 +435,71 @@ _EMOJI_SKIP = set('\U0000FE0F\U0001F3FB\U0001F3FC\U0001F3FD\U0001F3FE\U0001F3FF'
 MEDIA_RECIP_WINDOW_MS = 30 * 60 * 1000
 
 
+def _median_num(xs: List[float]) -> Optional[float]:
+    ys = sorted(v for v in xs if v is not None)
+    if not ys:
+        return None
+    m = len(ys) // 2
+    return ys[m] if len(ys) % 2 else (ys[m - 1] + ys[m]) / 2.0
+
+
+def _pearson(pairs: List[Tuple[float, float]]) -> Optional[float]:
+    """Pearson correlation of a list of (x, y) pairs, or None if undefined."""
+    n = len(pairs)
+    if n < 2:
+        return None
+    sx = sum(x for x, _ in pairs)
+    sy = sum(y for _, y in pairs)
+    sxx = sum(x * x for x, _ in pairs)
+    syy = sum(y * y for _, y in pairs)
+    sxy = sum(x * y for x, y in pairs)
+    num = n * sxy - sx * sy
+    den = ((n * sxx - sx * sx) * (n * syy - sy * sy)) ** 0.5
+    if den == 0:
+        return None
+    return num / den
+
+
+def _circadian_overlap(hours_a: List[int], hours_b: List[int]) -> Optional[float]:
+    """Cosine similarity of two 24-bin hour-of-day histograms."""
+    dot = sum(a * b for a, b in zip(hours_a, hours_b))
+    na = sum(a * a for a in hours_a) ** 0.5
+    nb = sum(b * b for b in hours_b) ** 0.5
+    if na == 0 or nb == 0:
+        return None
+    return dot / (na * nb)
+
+
+def _rupture_repair(week_vol: Dict[str, int]) -> Dict[str, Any]:
+    """Detect volume ruptures (>=70% drop vs trailing-4-week median after >=8
+    active weeks) and how many weeks each took to recover to >=60% of it."""
+    weeks = sorted(week_vol)
+    vols = [week_vol[w] for w in weeks]
+    ruptures: List[Dict[str, Any]] = []
+    i = 8
+    while i < len(vols):
+        base = _median_num(vols[i - 4:i]) or 0
+        if base > 0 and vols[i] <= 0.30 * base:
+            repair = None
+            for j in range(i + 1, len(vols)):
+                if vols[j] >= 0.60 * base:
+                    repair = j - i
+                    break
+            ruptures.append({'week': weeks[i],
+                             'repair_weeks': repair if repair is not None else -1})
+            # skip past this rupture's recovery to avoid double-counting
+            i = (i + repair + 1) if repair else i + 4
+        else:
+            i += 1
+    repaired = [r['repair_weeks'] for r in ruptures if r['repair_weeks'] >= 0]
+    return {
+        'ruptures': ruptures,
+        'n_ruptures': len(ruptures),
+        'median_repair_weeks': _median_num([float(x) for x in repaired]) if repaired else None,
+        'unrepaired': sum(1 for r in ruptures if r['repair_weeks'] < 0),
+    }
+
+
 def build_extras(messages: List[Dict[str, Any]],
                  participants: List[str],
                  timezone: str = DEFAULT_TIMEZONE) -> Dict[str, Any]:
@@ -406,19 +512,55 @@ def build_extras(messages: List[Dict[str, Any]],
             if is_real_message(m) and m.get('sender_name') in user_set]
     real.sort(key=lambda m: m.get('timestamp_ms', 0))
 
-    # ---- turn-length histogram (1..9, '10+') ------------------------------- #
+    # ---- turn-length histogram (1..9, '10+') + wave-2 session metrics ------ #
     turn_hist: Dict[str, Counter] = {u: Counter() for u in participants}
-    for session in _split_sessions(real):
-        run_sender, run_len = None, 0
+    # opening quality (metric 2): session depth by initiator
+    open_depth: Dict[str, List[int]] = {u: [] for u in participants}
+    open_words: Dict[str, List[int]] = {u: [] for u in participants}
+    # co-laughter (metric 5): sessions where both / exactly one laughed
+    co_laugh = 0
+    solo_laugh: Dict[str, int] = {u: 0 for u in participants}
+    laugh_sessions_total = 0
+    # turn-length elasticity (metric 6): opposite-sender consecutive turn words
+    elastic_pairs: Dict[str, List[Tuple[int, int]]] = defaultdict(list)  # cur -> (prev_w, cur_w)
+    sessions_list = _split_sessions(real)
+    for session in sessions_list:
+        # opening quality
+        if session:
+            opener = session[0].get('sender_name')
+            if opener in user_set:
+                open_depth[opener].append(len(session))
+                open_words[opener].append(
+                    sum(len((m.get('content') or '').split()) for m in session))
+        # co-laughter: which participants laughed this session
+        laughed = {u for u in participants
+                   if any(m.get('sender_name') == u and _has_laugh(m.get('content') or '')
+                          for m in session)}
+        if len(laughed) >= 2:
+            co_laugh += 1
+            laugh_sessions_total += 1
+        elif len(laughed) == 1:
+            solo_laugh[next(iter(laughed))] += 1
+            laugh_sessions_total += 1
+        # turns (runs) with word counts; pair consecutive opposite-sender turns
+        runs: List[Tuple[Optional[str], int]] = []
+        run_sender, run_len, run_words = None, 0, 0
         for msg in session + [None]:
             sender = msg.get('sender_name') if msg else None
             if sender == run_sender:
                 run_len += 1
+                run_words += len((msg.get('content') or '').split()) if msg else 0
                 continue
             if run_sender in user_set and run_len:
                 key = '10+' if run_len >= 10 else str(run_len)
                 turn_hist[run_sender][key] += 1
+                runs.append((run_sender, run_words))
             run_sender, run_len = sender, 1
+            run_words = len((msg.get('content') or '').split()) if msg else 0
+        for i in range(1, len(runs)):
+            (ps, pw), (cs, cw) = runs[i - 1], runs[i]
+            if ps != cs and ps in user_set and cs in user_set:
+                elastic_pairs[cs].append((pw, cw))
 
     # ---- media reciprocity -------------------------------------------------- #
     media_all = [m for m in messages if m.get('sender_name') in user_set]
@@ -536,12 +678,52 @@ def build_extras(messages: List[Dict[str, Any]],
                 'total': m_uniq_total[month][u][1],
             }
 
+    # ---- wave-2: circadian overlap, elasticity, openings, ruptures --------- #
+    hours_hist: Dict[str, List[int]] = {u: [0] * 24 for u in participants}
+    week_vol: Dict[str, int] = defaultdict(int)
+    for m in real:
+        u = m.get('sender_name')
+        dt = to_datetime(m.get('timestamp_ms', 0), timezone)
+        hours_hist[u][dt.hour] += 1
+        iso = dt.isocalendar()
+        week_vol[f'{iso[0]}-W{iso[1]:02d}'] += 1
+
+    circ_overlap = None
+    if len(participants) >= 2:
+        circ_overlap = _circadian_overlap(hours_hist[participants[0]],
+                                          hours_hist[participants[1]])
+
+    elasticity: Dict[str, Any] = {}
+    for u in participants:
+        r = _pearson([(float(a), float(b)) for a, b in elastic_pairs.get(u, [])])
+        elasticity[u] = {'r': round(r, 4) if r is not None else None,
+                         'n': len(elastic_pairs.get(u, []))}
+
+    opening_quality = {}
+    for u in participants:
+        opening_quality[u] = {
+            'n': len(open_depth[u]),
+            'median_msgs': _median_num([float(x) for x in open_depth[u]]),
+            'median_words': _median_num([float(x) for x in open_words[u]]),
+        }
+
+    laugh_block = {
+        'co_laugh_sessions': co_laugh,
+        'solo_laugh_sessions': dict(solo_laugh),
+        'laugh_sessions': laugh_sessions_total,
+    }
+
     return {
         'turn_hist': {u: dict(turn_hist[u]) for u in participants},
         'media_recip': recip,
         'nlp': nlp,
         'nlp_monthly': nlp_monthly,
         'lsm_monthly': lsm_monthly,
+        'circadian_overlap': round(circ_overlap, 4) if circ_overlap is not None else None,
+        'turn_elasticity': elasticity,
+        'opening_quality': opening_quality,
+        'rupture_repair': _rupture_repair(week_vol),
+        'laughter': laugh_block,
     }
 
 
@@ -899,21 +1081,39 @@ def _matches(folder: str, include: List[str], exclude: List[str]) -> bool:
 
 def discover_chats(output_dir: Path, include: List[str],
                    exclude: List[str]) -> List[Tuple[str, Path]]:
-    """Return ``(folder_name, latest_run_dir)`` for every eligible chat."""
+    """Return ``(folder_name, latest_run_dir)`` for every eligible chat.
+
+    Scans platform subdirectories (Instagram/, Telegram/) first. If none
+    exist, falls back to a flat structure for backwards compatibility.
+    """
     found = []
     if not output_dir.exists():
         return found
-    for chat_dir in sorted(output_dir.iterdir(), key=lambda p: p.name.lower()):
-        # The dashboard now lives at the repo root, so it is no longer inside
-        # the scanned Outputs tree — but keep skipping a legacy 'Dashboard'
-        # folder here for backwards compatibility with older layouts.
-        if not chat_dir.is_dir() or chat_dir.name == 'Dashboard':
+
+    # --- Try platform-structured layout first ---
+    for plat_dir in sorted(output_dir.iterdir(), key=lambda p: p.name.lower()):
+        if not plat_dir.is_dir() or plat_dir.name == 'Dashboard':
             continue
-        if not _matches(chat_dir.name, include, exclude):
-            continue
-        run = _latest_run(chat_dir)
-        if run is not None:
-            found.append((chat_dir.name, run))
+        for chat_dir in sorted(plat_dir.iterdir(), key=lambda p: p.name.lower()):
+            if not chat_dir.is_dir():
+                continue
+            if not _matches(chat_dir.name, include, exclude):
+                continue
+            run = _latest_run(chat_dir)
+            if run is not None:
+                found.append((chat_dir.name, run))
+
+    # --- Fallback to flat layout if no platform dirs found ---
+    if not found:
+        for chat_dir in sorted(output_dir.iterdir(), key=lambda p: p.name.lower()):
+            if not chat_dir.is_dir() or chat_dir.name == 'Dashboard':
+                continue
+            if not _matches(chat_dir.name, include, exclude):
+                continue
+            run = _latest_run(chat_dir)
+            if run is not None:
+                found.append((chat_dir.name, run))
+
     return found
 
 

@@ -322,11 +322,11 @@ button:disabled{opacity:.5;cursor:default}
 <div class="muted">Everything runs on your computer. Nothing is uploaded anywhere.</div>
 
 <div id="drop">Drop your Instagram or Telegram export <b>.zip</b> here<br>
-<span class="muted">or click to choose a file</span>
+<span class="muted">or click to choose a file, paste a path, or drop a folder</span>
 <input id="file" type="file" accept=".zip" hidden></div>
 
 <div class="sep">Or paste a path to a zip / folder on this computer</div>
-<input id="path" type="text" placeholder="/home/you/Downloads/instagram-export.zip">
+<input id="path" type="text" placeholder="/home/you/Downloads/export.zip or /path/to/chat-folder">
 <button id="pathbtn">Analyze this path</button>
 
 <div id="bar"><div></div></div>
