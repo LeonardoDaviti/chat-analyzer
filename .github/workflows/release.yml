@@ -21,10 +21,13 @@ jobs:
           - os: windows-latest
             asset: ChatAnalyzer-windows.exe
             built: dist/ChatAnalyzer.exe
-          - os: macos-latest        # Apple Silicon (arm64)
+          - os: ubuntu-24.04         # Linux (x86_64)
+            asset: ChatAnalyzer-linux-x64
+            built: dist/ChatAnalyzer
+          - os: macos-latest         # Apple Silicon (arm64)
             asset: ChatAnalyzer-macos-arm64
             built: dist/ChatAnalyzer
-          - os: macos-13            # Intel
+          - os: macos-13             # Intel
             asset: ChatAnalyzer-macos-intel
             built: dist/ChatAnalyzer
 
