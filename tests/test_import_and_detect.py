@@ -45,6 +45,36 @@ def test_import_zip_extracts_and_counts(tmp_path):
     assert (inbox / "bob_456" / "message_1.json").exists()
 
 
+def test_import_zip_cli_naming_unchanged(tmp_path):
+    """dest_name=None (the CLI --import-zip path) still uses the zip's stem."""
+    zip_path = tmp_path / "instagram-cli-export.zip"
+    _write_inbox_zip(zip_path, {"alice_1": ["Owner", "Alice"]})
+    target = main.import_zip(str(zip_path), tmp_path)
+    assert Path(target) == tmp_path / "Chats" / "Instagram" / "instagram-cli-export"
+
+
+def test_import_zip_dest_name_override(tmp_path):
+    """A browser upload's temp path is filed under the original filename."""
+    zip_path = tmp_path / "tmp2ip9o4qu.zip"
+    _write_inbox_zip(zip_path, {"alice_1": ["Owner", "Alice"]})
+    target = main.import_zip(str(zip_path), tmp_path, dest_name="Real Name.zip")
+    # extension stripped; folder named after the upload, not the temp stem
+    assert Path(target) == tmp_path / "Chats" / "Instagram" / "Real Name"
+    assert not (tmp_path / "Chats" / "Instagram" / "tmp2ip9o4qu").exists()
+
+
+def test_import_zip_collision_suffix(tmp_path):
+    """Re-importing the same name never merges/overwrites — it gets -2, -3, ..."""
+    zip_path = tmp_path / "e.zip"
+    _write_inbox_zip(zip_path, {"alice_1": ["Owner", "Alice"]})
+    t1 = main.import_zip(str(zip_path), tmp_path, dest_name="dup.zip")
+    t2 = main.import_zip(str(zip_path), tmp_path, dest_name="dup.zip")
+    t3 = main.import_zip(str(zip_path), tmp_path, dest_name="dup.zip")
+    assert Path(t1) == tmp_path / "Chats" / "Instagram" / "dup"
+    assert Path(t2) == tmp_path / "Chats" / "Instagram" / "dup-2"
+    assert Path(t3) == tmp_path / "Chats" / "Instagram" / "dup-3"
+
+
 def test_import_zip_rejects_zip_slip(tmp_path):
     zip_path = tmp_path / "evil.zip"
     with zipfile.ZipFile(zip_path, "w") as zf:

@@ -285,13 +285,19 @@ def _zip_platform(namelist: list[str]) -> str:
     return "unknown"
 
 
-def import_zip(zip_path: str, base_dir: Path) -> str:
+def import_zip(zip_path: str, base_dir: Path, dest_name: Optional[str] = None) -> str:
     """Extract an Instagram or Telegram export zip into the right platform
     subfolder (zip-slip safe).
 
     Detects the platform from the archive contents and extracts into
-    ``Chats/Instagram/<zipname>/`` or ``Chats/Telegram/<zipname>/``. Returns the
+    ``Chats/Instagram/<name>/`` or ``Chats/Telegram/<name>/``. Returns the
     target dir.
+
+    ``dest_name`` overrides the folder name (default: the zip's own stem). It is
+    used by the launcher to name uploads after the original filename rather than
+    the temp path a browser upload lands in. Any extension is stripped and, if
+    the target already exists and is non-empty, a ``-2``/``-3``/... suffix is
+    appended so an import never merges into or overwrites an existing one.
     """
     zp = Path(zip_path).expanduser()
     if not zp.exists():
@@ -310,7 +316,19 @@ def import_zip(zip_path: str, base_dir: Path) -> str:
             )
 
         subdir = "Telegram" if platform == "telegram" else "Instagram"
-        target = (base_dir / "Chats" / subdir / zp.stem)
+        stem = Path(dest_name).stem if dest_name else zp.stem
+        stem = stem or zp.stem
+        parent = base_dir / "Chats" / subdir
+        target = parent / stem
+        # Never merge into / overwrite an existing non-empty import — suffix it.
+        if target.exists() and any(target.iterdir()):
+            n = 2
+            while True:
+                candidate = parent / f"{stem}-{n}"
+                if not candidate.exists() or not any(candidate.iterdir()):
+                    target = candidate
+                    break
+                n += 1
         target.mkdir(parents=True, exist_ok=True)
         target_root = target.resolve()
 
@@ -763,6 +781,7 @@ def run_all(
     # Run pipeline for each chat
     results = []
     n = len(selected)
+    first_error: Optional[str] = None
     for i, (_label, chat_dir) in enumerate(selected):
         if progress_cb is not None:
             # chat folder name only — never contents (privacy)
@@ -778,9 +797,23 @@ def run_all(
             )
             results.append(result)
         except Exception as e:
+            if first_error is None:
+                first_error = str(e)
             print(f"\n❌ Error processing {chat_dir.split('/')[-1]}: {e}")
             import traceback
             traceback.print_exc()
+
+    # Fail loudly on a total wipeout: every discovered chat failed to load. A run
+    # where N/N chats raise must never end as if it succeeded (this masked the
+    # Windows tzdata crash in the field). Surface the FIRST per-chat error so the
+    # launcher can show it on the progress page instead of an empty dashboard.
+    if n > 0 and not results:
+        msg = (f"All {n} chat(s) failed to load — 0 processed. "
+               f"First error: {first_error or 'unknown'}")
+        print(f"\n{'='*60}")
+        print(f"❌ {msg}")
+        print(f"{'='*60}")
+        raise RuntimeError(msg)
 
     # Summary
     print(f"\n{'='*60}")

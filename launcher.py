@@ -56,16 +56,31 @@ def bundle_root() -> Path:
 def work_root() -> Path:
     """Writable data root — holds Chats/, Outputs/, Dashboard/.
 
-    ``CHAT_ANALYZER_HOME`` overrides everything (used by tests / to keep data
-    outside the app dir). Otherwise: next to the executable when frozen; the
-    repo root from source.
+    Resolution order:
+
+    1. ``CHAT_ANALYZER_HOME`` env var overrides everything (tests / advanced
+       users who want data outside the app dir).
+    2. Source-tree runs (not frozen) use the repo root — unchanged.
+    3. Frozen builds:
+       a. Legacy compatibility: if ``<exe dir>/Chats`` already exists, keep
+          using ``<exe dir>`` so v1 users' data isn't stranded.
+       b. Otherwise a stable, user-visible folder: ``~/Documents/ChatAnalyzer``
+          when ``~/Documents`` exists, else ``~/ChatAnalyzer``. This avoids
+          dumping Chats/Outputs/Dashboard into wherever the exe was launched
+          from (e.g. Downloads).
     """
     env = os.environ.get("CHAT_ANALYZER_HOME")
     if env:
         return Path(env).expanduser().resolve()
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent
+    if not getattr(sys, "frozen", False):
+        return Path(__file__).resolve().parent
+
+    exe_dir = Path(sys.executable).resolve().parent
+    if (exe_dir / "Chats").exists():
+        return exe_dir
+    documents = Path.home() / "Documents"
+    base = documents if documents.exists() else Path.home()
+    return (base / "ChatAnalyzer").resolve()
 
 
 BUNDLE_ROOT = bundle_root()
@@ -121,17 +136,32 @@ def _snapshot_progress() -> dict:
 # --------------------------------------------------------------------------- #
 # Pipeline worker
 # --------------------------------------------------------------------------- #
-def _ingest(source_path: Path) -> None:
+def _sanitize_upload_name(name: str) -> str:
+    """Reduce a browser-supplied filename to a safe basename.
+
+    Keeps only ``[A-Za-z0-9._ -]`` (strips path separators and anything else),
+    takes the basename so no directory components survive, and falls back to
+    ``upload.zip`` when nothing usable remains. Used to name the imported chat
+    folder after the uploaded file instead of a ``mkstemp`` temp name.
+    """
+    base = os.path.basename((name or "").replace("\\", "/"))
+    cleaned = "".join(c for c in base if c.isalnum() or c in "._ -").strip()
+    return cleaned or "upload.zip"
+
+
+def _ingest(source_path: Path, display_name: str | None = None) -> None:
     """Bring a user-supplied export into ``Chats/``.
 
     A ``.zip`` is routed through ``main.import_zip`` (platform-detected,
-    zip-slip safe). A directory is copied under ``Chats/`` so the recursive
-    discovery in ``main`` picks up its inbox / result.json.
+    zip-slip safe). ``display_name`` — when set (browser uploads) — names the
+    extracted folder after the original file instead of the temp path's stem.
+    A directory is copied under ``Chats/`` so the recursive discovery in
+    ``main`` picks up its inbox / result.json.
     """
     import main  # lazy — keeps `import launcher` matplotlib/numpy free
 
     if source_path.is_file() and source_path.suffix.lower() == ".zip":
-        main.import_zip(str(source_path), WORK_ROOT)
+        main.import_zip(str(source_path), WORK_ROOT, dest_name=display_name)
         return
     if source_path.is_dir():
         dest = WORK_ROOT / "Chats" / f"imported_{source_path.name}"
@@ -142,13 +172,18 @@ def _ingest(source_path: Path) -> None:
     raise ValueError(f"Not a zip or a folder: {source_path}")
 
 
-def run_pipeline(source_path: Path, cleanup: bool = False) -> None:
-    """Full pipeline in a worker thread: import → analyze → dashboard → connected."""
+def run_pipeline(source_path: Path, cleanup: bool = False,
+                 display_name: str | None = None) -> None:
+    """Full pipeline in a worker thread: import → analyze → dashboard → connected.
+
+    ``display_name`` is the sanitized original upload filename (or None for
+    path/folder imports); it names the extracted chat folder.
+    """
     global _running
     try:
-        _set_progress(stage="importing", detail=source_path.name,
+        _set_progress(stage="importing", detail=display_name or source_path.name,
                       i=0, n=0, done=False, error=None)
-        _ingest(source_path)
+        _ingest(source_path, display_name=display_name)
 
         import main
         _set_progress(stage="analyzing", detail="")
@@ -209,14 +244,16 @@ def run_pipeline(source_path: Path, cleanup: bool = False) -> None:
             _running = False
 
 
-def _start_run(source_path: Path, cleanup: bool) -> bool:
+def _start_run(source_path: Path, cleanup: bool,
+               display_name: str | None = None) -> bool:
     """Begin a run if none is active. Returns False if one is already running."""
     global _running
     with _state_lock:
         if _running:
             return False
         _running = True
-    t = threading.Thread(target=run_pipeline, args=(source_path, cleanup), daemon=True)
+    t = threading.Thread(target=run_pipeline,
+                         args=(source_path, cleanup, display_name), daemon=True)
     t.start()
     return True
 
@@ -320,6 +357,8 @@ button:disabled{opacity:.5;cursor:default}
 <body><div class="card">
 <h1>Chat Analyzer</h1>
 <div class="muted">Everything runs on your computer. Nothing is uploaded anywhere.</div>
+<div class="muted" style="margin-top:8px">Your dashboard and imported chats are stored in:<br>
+<code style="color:#4DB6AC;word-break:break-all">__WORK_ROOT__</code></div>
 
 <div id="drop">Drop your Instagram or Telegram export <b>.zip</b> here<br>
 <span class="muted">or click to choose a file, paste a path, or drop a folder</span>
@@ -374,6 +413,16 @@ _ADD_CHATS_SNIPPET = (
     b'font:600 13px -apple-system,Segoe UI,Roboto,sans-serif;text-decoration:none;'
     b'box-shadow:0 2px 8px rgba(0,0,0,.4)">\xe2\x9e\x95 Add chats</a>'
 )
+
+
+def render_setup_html() -> bytes:
+    """The setup/drop page with the writable data location filled in.
+
+    Users need to know where their dashboard and imported chats live — the
+    console window is the only other place it's shown. WORK_ROOT is a local
+    filesystem path (never chat content), safe to display.
+    """
+    return SETUP_HTML.replace("__WORK_ROOT__", str(WORK_ROOT)).encode("utf-8")
 
 
 def inject_add_chats(html: bytes) -> bytes:
@@ -466,7 +515,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, _snapshot_progress())
             return
         if route == "/setup":
-            self._send(200, SETUP_HTML.encode("utf-8"))
+            self._send(200, render_setup_html())
             return
         if route == "/":
             if manifest_ready():
@@ -512,11 +561,12 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             fd, tmp_path = tempfile.mkstemp(suffix=".zip")
             with os.fdopen(fd, "wb") as fh:
-                stream_multipart_file(self.rfile, length, boundary, fh)
+                original_name = stream_multipart_file(self.rfile, length, boundary, fh)
         except Exception as exc:
             self._json(400, {"error": f"upload failed: {exc}"})
             return
-        if not _start_run(Path(tmp_path), cleanup=True):
+        display_name = _sanitize_upload_name(original_name)
+        if not _start_run(Path(tmp_path), cleanup=True, display_name=display_name):
             self._json(409, {"busy": True})
             return
         self._json(200, {"started": True})
@@ -562,6 +612,10 @@ def main() -> None:
     httpd = _bind_server()
     host, port = httpd.server_address[0], httpd.server_address[1]
     url = f"http://{host}:{port}/"
+    print("=" * 60)
+    print(f"Your chats, dashboard and results are stored in:")
+    print(f"    {WORK_ROOT}")
+    print("=" * 60)
     print(f"Chat Analyzer running at {url}")
     print("Paste that address into your browser.")
     print("Press Ctrl+C to stop.")

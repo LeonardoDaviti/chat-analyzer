@@ -849,6 +849,11 @@ def build_connected_data(chats: List[Chat], owner: Any,
     deep_total = total_types['deep_talk']
     n_days_active = sum(1 for d in daily_out.values() if d['sessions'])
 
+    # Build sent-by-month as plain dict for JS range queries.
+    sent_by_month_map = {}
+    for mon, chat_counter in sent_by_month_contact.items():
+        sent_by_month_map[mon] = dict(chat_counter)
+
     payload = {
         'owner': owner_label,
         'variant': variant,
@@ -860,6 +865,7 @@ def build_connected_data(chats: List[Chat], owner: Any,
         'daily': daily_out,
         'monthly': monthly,
         'weekly': weekly,
+        'sent_by_month_contact': sent_by_month_map,
         'attention': {k: v for k, v in attention.items() if not k.startswith('_')},
         'contacts': contact_list,
         'leaderboards': {

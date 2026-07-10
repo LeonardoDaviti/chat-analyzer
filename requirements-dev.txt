@@ -2,3 +2,7 @@
 #   pip install -r requirements-dev.txt
 pytest>=7.0
 pyinstaller>=6.0
+# Bundled into the Windows binary so zoneinfo has an IANA tz database (Windows
+# ships none — without this every timestamp conversion raises). No-op on
+# Linux/macOS builds, harmless to install everywhere.
+tzdata>=2024.1

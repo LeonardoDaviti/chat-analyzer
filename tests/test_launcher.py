@@ -224,13 +224,100 @@ def test_ingest_copies_folder(launcher_mod, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Upload filename -> import folder name (Fix 3)
+# --------------------------------------------------------------------------- #
+def test_sanitize_upload_name(launcher_mod):
+    mod, _ = launcher_mod
+    assert mod._sanitize_upload_name("my export.zip") == "my export.zip"
+    # path components are stripped (basename only)
+    assert mod._sanitize_upload_name("../../etc/passwd") == "passwd"
+    assert mod._sanitize_upload_name("C:\\Users\\me\\export.zip") == "export.zip"
+    # disallowed chars removed
+    assert mod._sanitize_upload_name("weird*name?.zip") == "weirdname.zip"
+    # empty / all-stripped -> fallback
+    assert mod._sanitize_upload_name("") == "upload.zip"
+    assert mod._sanitize_upload_name("///") == "upload.zip"
+
+
+def test_ingest_names_folder_after_upload(launcher_mod, tmp_path):
+    """A browser upload (temp path) is filed under the ORIGINAL name, not tmp*."""
+    mod, home = launcher_mod
+    tmp = tmp_path / "tmp2ip9o4qu.zip"          # a mkstemp-style temp name
+    _make_instagram_zip(tmp)
+    mod._ingest(tmp, display_name="My Export.zip")
+    dest = home / "Chats" / "Instagram"
+    assert (dest / "My Export").exists()
+    assert not any(p.name.startswith("tmp") for p in dest.iterdir())
+
+
+# --------------------------------------------------------------------------- #
+# work_root() resolution order (Fix 2)
+# --------------------------------------------------------------------------- #
+def test_work_root_env_override(launcher_mod, tmp_path, monkeypatch):
+    mod, _ = launcher_mod
+    override = tmp_path / "custom_home"
+    monkeypatch.setenv("CHAT_ANALYZER_HOME", str(override))
+    assert mod.work_root() == override.resolve()
+
+
+def test_work_root_source_tree_uses_repo_root(launcher_mod, monkeypatch):
+    mod, _ = launcher_mod
+    monkeypatch.delenv("CHAT_ANALYZER_HOME", raising=False)
+    monkeypatch.setattr(mod.sys, "frozen", False, raising=False)
+    assert mod.work_root() == Path(mod.__file__).resolve().parent
+
+
+def test_work_root_frozen_legacy_dir(launcher_mod, tmp_path, monkeypatch):
+    """Frozen: existing <exe dir>/Chats keeps data next to the exe (v1 compat)."""
+    mod, _ = launcher_mod
+    monkeypatch.delenv("CHAT_ANALYZER_HOME", raising=False)
+    exe_dir = tmp_path / "app"
+    exe_dir.mkdir()
+    (exe_dir / "Chats").mkdir()                  # legacy data already present
+    fake_home = tmp_path / "userhome"
+    (fake_home / "Documents").mkdir(parents=True)
+    monkeypatch.setattr(mod.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(mod.sys, "executable", str(exe_dir / "ChatAnalyzer"))
+    monkeypatch.setattr(mod.Path, "home", staticmethod(lambda: fake_home))
+    assert mod.work_root() == exe_dir.resolve()
+
+
+def test_work_root_frozen_documents(launcher_mod, tmp_path, monkeypatch):
+    """Frozen, no legacy dir: ~/Documents/ChatAnalyzer when Documents exists."""
+    mod, _ = launcher_mod
+    monkeypatch.delenv("CHAT_ANALYZER_HOME", raising=False)
+    exe_dir = tmp_path / "downloads"
+    exe_dir.mkdir()                              # no Chats/ here
+    fake_home = tmp_path / "userhome"
+    (fake_home / "Documents").mkdir(parents=True)
+    monkeypatch.setattr(mod.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(mod.sys, "executable", str(exe_dir / "ChatAnalyzer"))
+    monkeypatch.setattr(mod.Path, "home", staticmethod(lambda: fake_home))
+    assert mod.work_root() == (fake_home / "Documents" / "ChatAnalyzer").resolve()
+
+
+def test_work_root_frozen_no_documents(launcher_mod, tmp_path, monkeypatch):
+    """Frozen, no legacy dir, no ~/Documents: ~/ChatAnalyzer."""
+    mod, _ = launcher_mod
+    monkeypatch.delenv("CHAT_ANALYZER_HOME", raising=False)
+    exe_dir = tmp_path / "downloads"
+    exe_dir.mkdir()
+    fake_home = tmp_path / "userhome"
+    fake_home.mkdir()                            # no Documents subfolder
+    monkeypatch.setattr(mod.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(mod.sys, "executable", str(exe_dir / "ChatAnalyzer"))
+    monkeypatch.setattr(mod.Path, "home", staticmethod(lambda: fake_home))
+    assert mod.work_root() == (fake_home / "ChatAnalyzer").resolve()
+
+
+# --------------------------------------------------------------------------- #
 # Progress-state transitions + double-submission guard
 # --------------------------------------------------------------------------- #
 def test_progress_state_transitions_and_double_submit(launcher_mod, tmp_path):
     mod, home = launcher_mod
     gate = threading.Event()
 
-    def fake_pipeline(source_path, cleanup=False):
+    def fake_pipeline(source_path, cleanup=False, display_name=None):
         mod._set_progress(stage="analyzing", i=0, n=1)
         gate.wait(2)
         mod._set_progress(stage="done", done=True)

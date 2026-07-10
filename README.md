@@ -98,6 +98,14 @@ app. It bundles everything, so there is nothing to install.
 Everything still runs 100% on your own computer — the little web page is just
 the app's screen; nothing is uploaded.
 
+**Where your results are saved:** the app stores your imported chats, the
+`Outputs/` files and the `Dashboard/` in a **`ChatAnalyzer`** folder inside your
+**Documents** folder (for example `Documents/ChatAnalyzer` — on Windows
+`C:\Users\You\Documents\ChatAnalyzer`), so results never get scattered into
+whatever folder you launched the app from. The exact location is printed in the
+black window at startup and shown on the drop page. To store data somewhere
+else, set the `CHAT_ANALYZER_HOME` environment variable to the folder you want.
+
 ### A one-time "are you sure?" warning (and why it's harmless)
 
 These apps are **free and unsigned** — we don't pay Apple or Microsoft for a

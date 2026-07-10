@@ -10,7 +10,7 @@ package, and the two build scripts. matplotlib/numpy are excluded on purpose —
 the launcher always analyses with ``skip_visualizations=True``.
 """
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 block_cipher = None
 
@@ -21,12 +21,14 @@ datas = [
     ("main.py", "."),
     ("build_dashboard.py", "."),
     ("build_connected.py", "."),
+    ("build_insights.py", "."),
     ("assets/echarts.min.js", "assets"),
-]
+] + collect_data_files("tzdata")  # zoneinfo files reached via importlib.resources
 
 hiddenimports = (
-    ["main", "build_dashboard", "build_connected"]
+    ["main", "build_dashboard", "build_connected", "build_insights", "tzdata"]
     + collect_submodules("src")
+    + collect_submodules("tzdata")
 )
 
 a = Analysis(
