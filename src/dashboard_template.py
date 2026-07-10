@@ -493,7 +493,6 @@ function esc(s){var d=document.createElement('div');d.textContent=(s==null?'':St
 /* ============================================================ *
  * FINDINGS ("Insights") — lazy-loaded from data/insights.js.
  * Precomputed all-time findings (Tier 1). Graceful when absent.
- * Windowed recompute for daily-table rules (docs/INSIGHTS.md §3.3).
  * ============================================================ */
 var INSIGHTS_STATE = {loaded:false, loading:false, cbs:[]};
 function ensureInsights(cb){
@@ -524,316 +523,37 @@ function fEvidenceLine(f){
   }
   return parts.slice(0,4).join(' · ');
 }
-function fCard(f){
-  var sev=(f.severity==='signal'||f.severity==='notable'||f.severity==='fun')?f.severity:'notable';
-  var anchor=f.anchor&&el(f.anchor)?f.anchor:null;
-  return '<div class="finding sev-'+sev+'">'
-    +'<div class="f-head"><span class="f-chip">'+esc(f.severity||'')+'</span>'
-    +'<span class="f-title">'+esc(f.title||'')+'</span></div>'
-    +'<div class="f-sentence">'+esc(f.sentence||'')+'</div>'
-    +'<div class="f-foot">'
-    +'<span class="f-evidence">'+fEvidenceLine(f)+'</span>'
-    +(anchor?'<button class="f-showme" data-anchor="'+esc(anchor)+'">show me →</button>':'')
-    +'</div></div>';
-}
-/* ---- JS-side windowed findings engine (daily-table rules only) ---- *
- * These rules mirror the Python WINDOWABLE_RULE_IDS set. Each function
- * takes (daily, users, startD, endD, owner) and returns a Finding dict
- * or null. The gating discipline holds: short windows get proportionally
- * scaled thresholds so findings don't fire on spurious patterns.
- * ============================================================ */
-function _wDaily(daily, users, sd, ed){
-  /** Return per-user sums within [sd,ed] from daily table. */
-  var out={A:{},B:{}};
-  for(var i=0;i<users.length;i++) out[users[i]]={};
-  for(var dk in daily){
-    var t=parseYMD(dk).getTime();
-    if(t<sd.getTime()||t>ed.getTime()) continue;
-    var c=daily[dk];
-    for(var ui=0;ui<users.length;ui++){
-      var u=users[ui], cell=c[u];
-      if(!cell) continue;
-      if(!out[u].msgs) out[u]={msgs:0,words:0,questions:0,questions_answered:0,
-        neg_words:0,pos_words:0,gratitude:0,apology:0,initiations:0,turns:0,
-        turns_answered:0,endings:0,self_restarts:0,reacted_leave:0,
-        resp_lat_sum_min:0,resp_lat_n:0,night_msgs:0};
-      var o=out[u];
-      o.msgs+=(cell.msgs||0); o.words+=(cell.words||0);
-      o.questions+=(cell.questions||0); o.questions_answered+=(cell.questions_answered||0);
-      o.neg_words+=(cell.neg_words||0); o.pos_words+=(cell.pos_words||0);
-      o.gratitude+=(cell.gratitude||0); o.apology+=(cell.apology||0);
-      o.initiations+=(cell.initiations||0); o.turns+=(cell.turns||0);
-      o.turns_answered+=(cell.turns_answered||0); o.endings+=(cell.endings||0);
-      o.self_restarts+=(cell.self_restarts||0); o.reacted_leave+=(cell.reacted_leave||0);
-      o.resp_lat_sum_min+=(cell.resp_lat_sum_min||0); o.resp_lat_n+=(cell.resp_lat_n||0);
-      o.night_msgs+=(cell.night_msgs||0);
-    }
-  }
-  return out;
-}
-function _wTotal(w){
-  return w.A.msgs+w.B.msgs;
-}
-function _wShare(u,w){
-  var t=_wTotal(w); return t?w[u].msgs/t:0;
-}
-function _wLatency(u,w){
-  return w[u].resp_lat_n?w[u].resp_lat_sum_min/w[u].resp_lat_n:0;
-}
-function _wAnswerRate(u,w){
-  var q=w[u].questions||0; return q?w[u].questions_answered/q:0;
-}
-function _wNegPosRatio(w){
-  var n=w.A.neg_words+w.B.neg_words, p=w.A.pos_words+w.B.pos_words;
-  return n?Math.min(p/n,99):0;
-}
-function _wCourtesy(w){
-  var tot=w.A.msgs+w.B.msgs; if(!tot) return {gratitude:0,apology:0};
-  return {
-    gratitude:(w.A.gratitude+w.B.gratitude)/tot*100,
-    apology:(w.A.apology+w.B.apology)/tot*100
-  };
-}
-function _wMediaRecip(w){
-  // simplified: use msgs as proxy for media_sent (extras.media_recip not in daily)
-  return null; // needs extras; return null to skip
-}
-function _wTurnDepth(u,w){
-  var t=w[u].turns||0, a=w[u].turns_answered||0;
-  return t?a/t:0;
-}
-function _wNightShare(u,w){
-  return w[u].msgs?w[u].night_msgs/w[u].msgs:0;
-}
-function _wInitShare(u,w){
-  var tot=w.A.initiations+w.B.initiations; return tot?w[u].initiations/tot:0;
-}
-function _wWeRatio(u,w){
-  // we_words not in daily table; skip
-  return null;
-}
-/* ---- Daily-table rule ports (mirrors WINDOWABLE_RULE_IDS) ---- */
-function jsRuleQuestionImbalance(w,users,owner){
-  var tot=_wTotal(w);
-  if(tot<100) return null; // proportional gate for short windows
-  var a=users[0],b=users[1];
-  var qa=w[a].questions||0,qb=w[b].questions||0;
-  if(qa<5||qb<5) return null;
-  var ra=qa>0?w[a].questions_answered/qa:0;
-  var rb=qb>0?w[b].questions_answered/qb:0;
-  for(var i=0;i<2;i++){
-    var X=users[i],Y=users[1-i],rx=(i===0?ra:rb),ry=(i===0?rb:ra);
-    if(ry<=0) continue;
-    if(rx<=0.6*ry){
-      var hang=1-rx, effect=Math.min((ry-rx)/Math.max(ry,1e-6),1);
-      return {id:'question-imbalance',scope:'chat',category:'dynamics',severity:'signal',
-        direction:'asym',confidence:(rx>=0.5?'high':'medium'),
-        title:'Questions left hanging',
-        sentence:_Name(X,owner)+' ask a lot of questions — '+_pct(hang)+' get no reply.',
-        evidence:{asker:X,answer_rate:Math.round(rx*1000)/1000,window:{from:null,to:null}}};
-    }
-  }
-  return null;
-}
-function jsRuleGottmanRatio(w){
-  var r=_wNegPosRatio(w); if(r===null) return null;
-  if(r>=5) return null;
-  var effect=Math.min(r/5,1);
-  return {id:'gottman-ratio',scope:'chat',category:'language',severity:r<1?'signal':'notable',
-    direction:'down',confidence:effect>0.8?'high':'medium',
-    title:'Positivity balance',
-    sentence:'Warm words '+(_pct(r*100).replace('%','')+'×')+' the cold ones — below the 5:1 line.',
-    evidence:{pos_neg_ratio:Math.round(r*10)/10,window:{from:null,to:null}}};
-}
-function jsRuleCourtesyAsymmetry(w,users){
-  var c=_wCourtesy(w); if(c.gratitude+c.apology<2) return null;
-  var ga=w.A.gratitude||0,gb=w.B.gratitude||0;
-  if(ga<1||gb<1) return null;
-  var r=ga/gb;if(r>=2||r<=0.5){
-    var X=users[0],Y=users[1];
-    return {id:'courtesy-asymmetry',scope:'chat',category:'language',severity:'notable',
-      direction:r>1?'up':'down',confidence:'medium',
-      title:'Courtesy gap',
-      sentence:_Name(X,users[0])+' says thank you '+_x(r)+' as often as '+_Name(Y,users[0]).toLowerCase()+'.',
-      evidence:{gratitude_A:ga,gratitude_B:gb,window:{from:null,to:null}}};
-  }
-  return null;
-}
-function jsRuleDepthMismatch(w,users){
-  var ta=_wTurnDepth(users[0],w),tb=_wTurnDepth(users[1],w);
-  if(ta<0.2||tb<0.2) return null;
-  for(var i=0;i<2;i++){
-    var X=users[i],Y=users[1-i],r=i===0?ta/tb:tb/ta;
-    if(r>=1.5){
-      return {id:'depth-mismatch',scope:'chat',category:'dynamics',severity:'notable',
-        direction:'asym',confidence:'medium',
-        title:'Depth mismatch',
-        sentence:_Name(X,users[0])+'\'s turns get answered '+_x(r)+' more often than '+_Name(Y,users[0]).toLowerCase()+'\'s.',
-        evidence:{depth_X:Math.round(ta*100)/100,depth_Y:Math.round(tb*100)/100,window:{from:null,to:null}}};
-    }
-  }
-  return null;
-}
-function jsRuleNightMigration(w,users){
-  var na=_wNightShare(users[0],w),nb=_wNightShare(users[1],w);
-  if(na<0.15||nb<0.15) return null;
-  for(var i=0;i<2;i++){
-    var X=users[i],Y=users[1-i],rx=i===0?na:nb,ry=i===0?nb:na;
-    if(rx>=1.8*ry){
-      return {id:'night-migration',scope:'chat',category:'rhythm',severity:'notable',
-        direction:'asym',confidence:'medium',
-        title:'Night owl preference',
-        sentence:_Name(X,users[0])+' texts at night '+_x(rx/ry)+' as often as '+_Name(Y,users[0]).toLowerCase()+'.',
-        evidence:{night_share_X:Math.round(rx*100)/100,night_share_Y:Math.round(ry*100)/100,window:{from:null,to:null}}};
-    }
-  }
-  return null;
-}
-function jsRuleMonologueDrift(w,users){
-  var ta=w[users[0]].turns||0,tb=w[users[1]].turns||0;
-  var tot=ta+tb;if(!tot) return null;
-  var sh=Math.max(ta,tb)/tot;
-  if(sh<0.75||tot<30) return null;
-  var X=ta>tb?users[0]:users[1];
-  return {id:'monologue-drift',scope:'chat',category:'dynamics',severity:'notable',
-    direction:'asym',confidence:sh>0.85?'high':'medium',
-    title:'Conversational asymmetry',
-    sentence:_Name(X,users[0])+' produces '+_pct(sh).replace('%','')+' of turns — one-sided conversations.',
-    evidence:{share:Math.round(sh*100)/100,total_turns:tot,window:{from:null,to:null}}};
-}
-function jsRuleWeNessShift(w,users){
-  // we_words not in daily; skip
-  return null;
-}
-function jsRuleEagerWaiter(w,users){
-  var la=w[users[0]].resp_lat_n||0,lb=w[users[1]].resp_lat_n||0;
-  if(la<10||lb<10) return null;
-  var ra=w[users[0]].resp_lat_sum_min/(la||1);
-  var rb=w[users[1]].resp_lat_sum_min/(lb||1);
-  var minLat=Math.min(ra,rb),maxLat=Math.max(ra,rb);
-  if(minLat<1||maxLat/minLat<3) return null;
-  var slow=(ra<rb?users[0]:users[1]);
-  return {id:'eager-waiter',scope:'chat',category:'rhythm',severity:'notable',
-    direction:'up',confidence:'medium',
-    title:'Eager waiter',
-    sentence:_Name(slow,users[0])+' waits by the phone — average reply time '+Math.round(minLat)+' min vs '+Math.round(maxLat)+' min.',
-    evidence:{waiter:slow,wait_min:Math.round(minLat),window:{from:null,to:null}}};
-}
-function jsRuleLeftOnReact(w,users){
-  var la=w[users[0]].reacted_leave||0,lb=w[users[1]].reacted_leave||0;
-  var tot=la+lb;if(tot<15) return null;
-  var sh=Math.max(la,lb)/tot;
-  if(sh<0.7) return null;
-  var X=la>lb?users[0]:users[1];
-  return {id:'left-on-react',scope:'chat',category:'dynamics',severity:'notable',
-    direction:'asym',confidence:sh>0.8?'high':'medium',
-    title:'React-and-left',
-    sentence:_Name(X,users[0])+' often exits with just a reaction — '+_pct(sh).replace('%','')+' of react-leaves.',
-    evidence:{react_share:Math.round(sh*100)/100,total_reacts:tot,window:{from:null,to:null}}};
-}
-function jsRuleUnansweredBids(w,users,owner){
-  var tot=_wTotal(w); if(tot<200) return null;
-  var qa=w[users[0]].questions||0,qb=w[users[1]].questions||0;
-  if(qa<10||qb<10) return null;
-  var ra=qa>0?w[users[0]].questions_answered/qa:0;
-  var rb=qb>0?w[users[1]].questions_answered/qb:0;
-  for(var i=0;i<2;i++){
-    var X=users[i],Y=users[1-i],rx=(i===0?ra:rb),ry=(i===0?rb:ra);
-    if(ry<=0) continue;
-    if(rx<=0.6*ry){
-      var hang=1-rx, effect=Math.min((ry-rx)/Math.max(ry,1e-6),1);
-      return {id:'unanswered-bids',scope:'chat',category:'dynamics',severity:'signal',
-        direction:'asym',confidence:effect>0.8?'high':'medium',
-        title:'Questions left hanging',
-        sentence:_Name(Y,owner)+' leaves '+_pct(hang)+' of '+_Name(X,owner)+'\'s questions hanging.',
-        evidence:{asker:X,answer_rate:Math.round(rx*1000)/1000,window:{from:null,to:null}}};
-    }
-  }
-  return null;
-}
-function jsRuleFeastAndFamine(w){
-  // needs weekly aggregation — not available in daily-only; skip
-  return null;
-}
-function jsRuleSteadyDrumbeat(w){
-  // needs weekly aggregation — not available in daily-only; skip
-  return null;
-}
-/* Rule registry — mirrors Python WINDOWABLE_RULE_IDS. */
-var JS_WINDOWABLE_RULES = {
-  'question-imbalance': jsRuleQuestionImbalance,
-  'gottman-ratio': jsRuleGottmanRatio,
-  'courtesy-asymmetry': jsRuleCourtesyAsymmetry,
-  'depth-mismatch': jsRuleDepthMismatch,
-  'night-migration': jsRuleNightMigration,
-  'monologue-drift': jsRuleMonologueDrift,
-  'eager-waiter': jsRuleEagerWaiter,
-  'left-on-react': jsRuleLeftOnReact,
-  'unanswered-bids': jsRuleUnansweredBids,
-};
-/* Run all windowable rules over daily data in [sd,ed]. */
-function computeWindowedFindings(chatId, daily, users, owner, sd, ed){
-  var w=_wDaily(daily,users,sd,ed);
-  if(_wTotal(w)<50) return [];
-  var findings=[];
-  for(var rid in JS_WINDOWABLE_RULES){
-    try{
-      var fn=JS_WINDOWABLE_RULES[rid];
-      var f=fn(w,users,owner);
-      if(f){
-        f.window={from:ymd(sd),to:ymd(ed)};
-        findings.push(f);
-      }
-    }catch(e){}
-  }
-  /* Sort by score-like heuristic (severity desc, then id asc). */
-  var sevOrder={signal:0,notable:1,fun:2};
-  findings.sort(function(a,b){
-    var sa=sevOrder[a.severity||'notable']||1;
-    var sb=sevOrder[b.severity||'notable']||1;
-    return sa-sb||(a.id||'').localeCompare(b.id||'');
-  });
-  return findings.slice(0,12);
-}
 /* Render findings for the current scope into #findingsBox.
    scopeKey: a chat id, or 'connected:<variant>'. */
 function renderFindings(scopeKey){
   var box=el('findingsBox'); if(!box) return;
-  var html='';
-  /* ---- Windowed findings (chat only, daily-table rules) ---- */
-  if(scopeKey.indexOf('connected:')!==0){
-    var chatId=scopeKey, daily=(state.chat||{}).daily||{}, users=state.users||[];
-    if(daily&&users.length===2){
-      var wf=computeWindowedFindings(chatId,daily,users,state.owner||'',state.start,state.end);
-      if(wf.length){
-        html+='<div class="findings">';
-        for(var i=0;i<wf.length;i++) html+=fCard(wf[i]);
-        html+='</div>';
-        if(!window.INSIGHTS||!window.INSIGHTS[chatId]||!window.INSIGHTS[chatId].length){
-          html+='<div class="findings-note">Findings for the selected time range.</div>';
-        }
-      }
-    }
-  }
-  /* ---- All-time findings (from insights.js) ---- */
   var all=window.INSIGHTS||{};
-  var allList;
+  var list;
   if(scopeKey.indexOf('connected:')===0){
     var v=scopeKey.slice('connected:'.length);
-    allList=((all.connected||{})[v])||[];
+    list=((all.connected||{})[v])||[];
   } else {
-    allList=all[scopeKey]||[];
+    list=all[scopeKey]||[];
   }
-  if(allList.length){
-    if(html) html+='<div class="findings-note">— All-time findings (full history) —</div>';
-    html+='<div class="findings">';
-    for(var i=0;i<allList.length;i++) html+=fCard(allList[i]);
-    html+='</div>';
-  }
-  if(!html){
-    box.innerHTML='<div class="findings-empty">Nothing stands out in this window — that's a finding too.</div>';
+  if(!list.length){
+    box.innerHTML='<div class="findings-empty">Nothing stands out in this window — that’s a finding too.</div>';
     return;
   }
+  var html='<div class="findings">';
+  for(var i=0;i<list.length;i++){
+    var f=list[i];
+    var sev=(f.severity==='signal'||f.severity==='notable'||f.severity==='fun')?f.severity:'notable';
+    var anchor=f.anchor&&el(f.anchor)?f.anchor:null;
+    html+='<div class="finding sev-'+sev+'">'
+      +'<div class="f-head"><span class="f-chip">'+esc(f.severity||'')+'</span>'
+      +'<span class="f-title">'+esc(f.title||'')+'</span></div>'
+      +'<div class="f-sentence">'+esc(f.sentence||'')+'</div>'
+      +'<div class="f-foot">'
+      +'<span class="f-evidence">'+fEvidenceLine(f)+'</span>'
+      +(anchor?'<button class="f-showme" data-anchor="'+esc(anchor)+'">show me →</button>':'')
+      +'</div></div>';
+  }
+  html+='</div><div class="findings-note">All-time findings across this chat’s full history.</div>';
   box.innerHTML=html;
   var btns=box.querySelectorAll?box.querySelectorAll('.f-showme'):[];
   Array.prototype.forEach.call(btns,function(btn){
@@ -843,10 +563,6 @@ function renderFindings(scopeKey){
 }
 function loadAndRenderFindings(scopeKey){
   ensureInsights(function(){ try{ renderFindings(scopeKey); }catch(e){} });
-  /* Also render windowed findings even without insights.js. */
-  if(scopeKey.indexOf('connected:')!==0){
-    try{ renderFindings(scopeKey); }catch(e){}
-  }
 }
 
 /* ============================================================ *
@@ -872,12 +588,6 @@ function renderAll(){
   safe(renderLanguage,'language');
   safe(function(){renderTelegram(rt);},'telegram');
   safe(function(){renderShifts(rt);},'shifts');
-  // Findings: windowed recompute for daily-table rules + all-time from insights.js.
-  safe(function(){
-    if(el('findingsBox')&&state.chat&&state.users&&state.users.length===2){
-      try{renderFindings(state.chat.id||'chat');}catch(e){}
-    }
-  },'findings');
   // Lifetime + turn-hist cards are range-independent; rendered per chat.
 }
 /* One broken chart must never take down the rest of the page. */
@@ -1104,12 +814,6 @@ function renderAllExceptVolumeZoom(){
   safe(function(){renderPsycho(b,rt);},'psycho');
   safe(renderLanguage,'language');
   safe(function(){renderShifts(rt);},'shifts');
-  // Findings: windowed recompute for daily-table rules.
-  safe(function(){
-    if(el('findingsBox')&&state.chat&&state.users&&state.users.length===2){
-      try{renderFindings(state.chat.id||'chat');}catch(e){}
-    }
-  },'findings');
 }
 function clampDate(d){
   var t=d.getTime();
