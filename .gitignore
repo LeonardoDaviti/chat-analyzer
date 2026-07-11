@@ -30,8 +30,10 @@ normalized_cache.json
 # Generated research / analysis docs
 group_chat_schema_report.md
 V3_METRICS_IMPLEMENTATION_PLAN.md
-# All dev docs (development-only, never public)
-docs/
+# All dev docs (development-only, never public) — except the README
+# screenshots under docs/img/, which are public (embedded in README.md).
+docs/*
+!docs/img/
 
 # PyInstaller build artifacts
 build/

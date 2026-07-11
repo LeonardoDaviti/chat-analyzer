@@ -15,6 +15,41 @@ folder on your machine.
 
 ---
 
+## A look at what you get
+
+_(All screenshots use a **synthetic** demo corpus — invented names and
+messages, never anyone's real chats. Regenerate them any time with
+`python scripts/screenshots.py`.)_
+
+![The per-chat dashboard: headline numbers, an activity timeline, and balance
+charts — with a platform filter to show Instagram, Telegram, or
+both.](docs/img/chat.png)
+*Per-chat view — pulse metrics, story timeline and balance charts. The
+Instagram / Telegram platform filter sits right next to the chat picker.*
+
+![Plain-language Findings cards explaining what stands out in a
+chat.](docs/img/findings.png)
+*Findings — short, plain-language callouts ("a turning point", "the record
+book", "laughing together"), each with the numbers behind it and a "show me →"
+link to its chart.*
+
+![The chat picker open, listing every chat with a platform badge and the
+platform filter chips above it.](docs/img/platform_filter.png)
+*The chat picker — Instagram and Telegram chats live in one list (platform
+badges shown); the filter chips at the top narrow it to one platform.*
+
+![The Connected view: a cross-chat profile of you across every
+conversation.](docs/img/connected.png)
+*👤 You — Connected — a cross-chat portrait of you: texting span, attention
+spread, session mix, and where your messages go across everyone.*
+
+![The setup drop page where you drag in an export zip or
+folder.](docs/img/setup.png)
+*The setup page — drop an export **.zip or folder**, pick a file/folder, or
+paste a path. "Re-analyze everything" and "Start fresh" manage your data.*
+
+---
+
 ## What you need
 
 - A computer running Windows, macOS, or Linux.
@@ -355,6 +390,41 @@ correctly. You don't need to do anything.
 Use the `--chat` option with part of the person's name, for example
 `python main.py --chat "<chat-name>"` and then
 `python build_dashboard.py --chat "<chat-name>"`.
+
+**I added a new export into `Chats/` — how do I refresh?**
+You have two easy ways:
+- **In the app (easiest):** open the dashboard and click **↻ Re-analyze** in the
+  bottom-right corner (next to **➕ Add chats**), or open the setup page and
+  click **↻ Re-analyze everything**. It re-runs the whole analysis over
+  everything currently in `Chats/` — no re-import needed — and rebuilds the
+  dashboard, connected profile and findings.
+- **From the command line:** re-run the pipeline and the builders:
+  ```
+  python main.py
+  python build_dashboard.py
+  python build_connected.py
+  python build_insights.py
+  ```
+  (You only need `--import-zip` for a *brand-new* download; a folder you copied
+  straight into `Chats/` is picked up automatically.)
+
+**Can I import a Telegram folder without zipping it?**
+Yes. Telegram exports arrive as a folder (the one with `result.json`). On the
+setup page you can **drag the whole folder onto the drop zone**, click
+**choose a folder** to pick it, or paste its path. (You can also drop a plain
+`.zip`, or copy the folder into `Chats/Telegram/` yourself.)
+
+**Someone else wants to try it on my computer — how do I clear my data first?**
+On the setup page click **Start fresh (archive current data)**. It moves your
+current `Chats/`, `Outputs/` and `Dashboard/` into a timestamped
+`ChatAnalyzer.backup-…` folder (nothing is deleted) and returns you to an empty
+setup page. Rename the backup back if you want your data again.
+
+**Does the app phone home?**
+The analysis never leaves your machine. The only network request the app ever
+makes is a single, optional check against GitHub for a newer release, so it can
+show a small "update available" banner. It has a short timeout and fails
+silently — if you're offline, nothing happens and no banner appears.
 
 **Where are my results?**
 Charts and data are in `Outputs/`. The interactive page is
