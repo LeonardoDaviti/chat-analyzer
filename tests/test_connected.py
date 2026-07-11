@@ -423,6 +423,125 @@ def test_cli_no_telegram_skips_gracefully(tmp_path):
     assert allp["platforms"] == ["instagram"]
 
 
+# --------------------------------------------------------------------------- #
+# contact_monthly — the per-contact per-month windowed data layer
+# --------------------------------------------------------------------------- #
+
+MONTH_MS = 31 * 24 * HOUR  # comfortably crosses a month boundary
+
+
+def _cm_row(p, month, chat_id):
+    return p["contact_monthly"].get(month, {}).get(chat_id)
+
+
+def test_contact_monthly_counter_correctness_and_bucketing():
+    # Two months of activity in one chat. Owner sends in both months; contact
+    # replies. Verify sent/recv land in the right month bucket and totals match.
+    m1 = BASE
+    # advance to a clearly different calendar month
+    from src.timeutil import to_datetime
+    m2 = BASE + MONTH_MS
+    while to_datetime(m2, TZ).strftime("%Y-%m") == to_datetime(m1, TZ).strftime("%Y-%m"):
+        m2 += 7 * 24 * HOUR
+    mon1 = to_datetime(m1, TZ).strftime("%Y-%m")
+    mon2 = to_datetime(m2, TZ).strftime("%Y-%m")
+
+    raw = [
+        msg(m1, OWNER), msg(m1 + MIN, OWNER), msg(m1 + 2 * MIN, "A"),   # mon1: 2 sent, 1 recv
+        msg(m2, OWNER), msg(m2 + MIN, "A"), msg(m2 + 2 * MIN, "A"),     # mon2: 1 sent, 2 recv
+    ]
+    c = make_chat("a", [OWNER, "A"], raw)
+    p = build_connected_data([c], OWNER, TZ, min_msgs=0, min_replies=0)
+
+    r1, r2 = _cm_row(p, mon1, "a"), _cm_row(p, mon2, "a")
+    assert r1 and r2
+    assert r1["sent"] == 2 and r1["recv"] == 1
+    assert r2["sent"] == 1 and r2["recv"] == 2
+    # zero counters are omitted entirely
+    assert all(v != 0 for v in r1.values())
+    # totals reconcile with the all-time contact record
+    ct = next(x for x in p["contacts"] if x["name"] == "A")
+    tot_sent = sum(p["contact_monthly"][mo]["a"].get("sent", 0)
+                   for mo in p["contact_monthly"] if "a" in p["contact_monthly"][mo])
+    assert tot_sent == ct["sent"]
+
+
+def test_contact_monthly_night_and_words_and_style():
+    from src.timeutil import to_datetime
+    ts = BASE
+    while to_datetime(ts, TZ).hour != 2:      # a 02:00 local (night) anchor
+        ts += HOUR
+    mon = to_datetime(ts, TZ).strftime("%Y-%m")
+    # owner sends two 3-word georgian-tagged msgs at night; contact replies once.
+    raw = [
+        {"timestamp_ms": ts, "sender_name": OWNER, "content": "one two three",
+         "language": "georgian", "type": "text"},
+        {"timestamp_ms": ts + MIN, "sender_name": OWNER, "content": "aa bb cc",
+         "language": "georgian", "type": "text"},
+        {"timestamp_ms": ts + 2 * MIN, "sender_name": "A", "content": "hi",
+         "language": "english", "type": "text"},
+    ]
+    c = make_chat("a", [OWNER, "A"], raw)
+    p = build_connected_data([c], OWNER, TZ, min_msgs=0, min_replies=0)
+    r = _cm_row(p, mon, "a")
+    assert r["night_sent"] == 2
+    assert r["words_sent"] == 6           # 3 + 3 owner words
+    assert r["lang_geo"] == 2 and r["lang_total"] == 2
+    assert r["turns_sent"] == 1           # one maximal owner run
+    assert r["sessions"] == 1 and r["initiations"] == 1
+
+
+def test_contact_monthly_reply_latency_bucket():
+    from src.timeutil import to_datetime
+    raw = [msg(BASE, "A"), msg(BASE + 2 * MIN, OWNER),        # owner reply, 2 min
+           msg(BASE + 4 * MIN, "A"), msg(BASE + 7 * MIN, OWNER)]  # owner reply, 3 min
+    mon = to_datetime(BASE, TZ).strftime("%Y-%m")
+    c = make_chat("a", [OWNER, "A"], raw)
+    p = build_connected_data([c], OWNER, TZ, min_msgs=0, min_replies=0)
+    r = _cm_row(p, mon, "a")
+    assert r["reply_lat_n"] == 2
+    assert r["reply_lat_sum_min"] == pytest.approx(5.0, abs=0.01)
+
+
+def test_contact_monthly_reaction_latency_both_directions():
+    from src.timeutil import to_datetime
+    mon = to_datetime(BASE, TZ).strftime("%Y-%m")
+    # Telegram-style dated reactions. Owner reacts to A's msg after 60s; A reacts
+    # to owner's msg after 120s.
+    a_msg = {"timestamp_ms": BASE, "sender_name": "A", "content": "hi there",
+             "language": "english", "type": "text",
+             "reactions": [{"actor": OWNER, "date": BASE + 60 * 1000}]}
+    o_msg = {"timestamp_ms": BASE + 5 * MIN, "sender_name": OWNER, "content": "yo there",
+             "language": "english", "type": "text",
+             "reactions": [{"actor": "A", "date": BASE + 5 * MIN + 120 * 1000}]}
+    c = make_chat("a", [OWNER, "A"], [a_msg, o_msg])
+    p = build_connected_data([c], OWNER, TZ, min_msgs=0, min_replies=0)
+    r = _cm_row(p, mon, "a")
+    assert r["react_you_n"] == 1 and r["react_you_sum_s"] == pytest.approx(60.0, abs=0.1)
+    assert r["react_them_n"] == 1 and r["react_them_sum_s"] == pytest.approx(120.0, abs=0.1)
+
+
+def test_contact_monthly_merge_folds_rows():
+    # Same human on IG + TG; identity merge folds their monthly rows into one.
+    from src.timeutil import to_datetime
+    mon = to_datetime(BASE, TZ).strftime("%Y-%m")
+    ig = make_chat("ig", ["David", "Alice"],
+                   [msg(BASE, "David"), msg(BASE + MIN, "Alice")], platform="instagram")
+    tg = make_chat("tg", ["Davidus", "Alice"],
+                   [msg(BASE + 2 * MIN, "Davidus"), msg(BASE + 3 * MIN, "Alice")],
+                   platform="telegram")
+    identities = [{"name": "Alice", "members": ["instagram:ig", "telegram:tg"]}]
+    p = build_connected_data([ig, tg], "David", TZ, min_msgs=0, min_replies=0,
+                             variant="all", platforms=["instagram", "telegram"],
+                             owner_names={"David", "Davidus"}, identities=identities)
+    # a single merged entity id holds the combined monthly row (2 sent total)
+    month = p["contact_monthly"][mon]
+    assert "ig" not in month and "tg" not in month
+    merged_ids = [cid for cid in month if cid.startswith("merged_")]
+    assert len(merged_ids) == 1
+    assert month[merged_ids[0]]["sent"] == 2
+
+
 def test_owner_aggregate_daily_table():
     c = make_chat("a", [OWNER, "A"], [
         msg(BASE, OWNER), msg(BASE + MIN, OWNER), msg(BASE + 2 * MIN, "A"),

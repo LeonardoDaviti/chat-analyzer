@@ -503,6 +503,12 @@ def _merge_contact_group(contacts: Dict[str, Dict[str, Any]],
         for f in _EXTEND_LIST_FIELDS:
             merged[f].extend(ct[f])
         merged['_months'].update(ct['_months'])
+        # Fold per-contact monthly counters so the merged person recomputes
+        # windowed metrics from one combined per-month row.
+        for mon, cell in ct['_cm'].items():
+            dst = merged['_cm'][mon]
+            for kk, vv in cell.items():
+                dst[kk] += vv
 
     firsts = [ct for ct in parts if ct['_first_ts'] is not None]
     lasts = [ct['_last_ts'] for ct in parts if ct['_last_ts'] is not None]
@@ -702,11 +708,14 @@ def build_connected_data(chats: List[Chat], owner: Any,
                 ct['_first_sender'] = r['sender_name']
             last_ts = r['timestamp_ms']
             is_owner = r['sender_name'] in owners
+            cm = ct['_cm'][r['mon']]
             if is_owner:
                 ct['sent'] += 1
                 ct['emoji_sent'] += r['em']
                 ct['media_sent'] += r['media']
                 ct['_o_msgs'] += 1
+                cm['sent'] += 1
+                cm['emoji_sent'] += r['em']
                 if r['real']:
                     ct['_o_words'] += r['w']
                     ct['_o_wlen'] += r['wlen']
@@ -715,12 +724,21 @@ def build_connected_data(chats: List[Chat], owner: Any,
                     ct['_o_pos'] += r['pos']
                     ct['_o_em'] += r['em']
                     ct['_o_lang'][r['lang']] += 1
+                    cm['words_sent'] += r['w']
+                    cm['chars_sent'] += r['ch']
+                    cm['o_wlen'] += r['wlen']
+                    cm['lang_total'] += 1
+                    if r['lang'] == 'georgian':
+                        cm['lang_geo'] += 1
                 if r['h'] in NIGHT_HOURS:
                     ct['night_msgs'] += 1
+                    cm['night_sent'] += 1
             else:
                 ct['received'] += 1
                 ct['_c_msgs'] += 1
                 ct['_c_em'] += r['em']
+                cm['recv'] += 1
+                cm['recv_emoji'] += r['em']
         ct['_first_ts'] = first_ts
         ct['_last_ts'] = last_ts
         ct['_months'] = {r['mon'] for r in c.recs if not r['sys']}
@@ -732,8 +750,20 @@ def build_connected_data(chats: List[Chat], owner: Any,
                 continue
             opener = session[0]['sender_name']
             ct['sessions'] += 1
+            s_mon = session[0]['mon']
+            ct['_cm'][s_mon]['sessions'] += 1
             if opener in owners:
                 ct['initiations'] += 1
+                ct['_cm'][s_mon]['initiations'] += 1
+
+            # owner "turns" (maximal same-sender owner runs), attributed to the
+            # month of each run's first message — feeds words-per-turn openness.
+            prev_owner = False
+            for r in session:
+                ownr = r['sender_name'] in owners
+                if ownr and not prev_owner:
+                    ct['_cm'][r['mon']]['turns_sent'] += 1
+                prev_owner = ownr
 
             # session type + time-spent (attributed to start day/week/month)
             stype, _ = classify_session(session, owners, media_ts)
@@ -770,6 +800,9 @@ def build_connected_data(chats: List[Chat], owner: Any,
                 if cur['sender_name'] in owners:
                     ct['_lat'].append(gap / 60000.0)
                     ct['_lat_ts'].append(cur['timestamp_ms'])
+                    cmr = ct['_cm'][cur['mon']]
+                    cmr['reply_lat_sum_min'] += gap / 60000.0
+                    cmr['reply_lat_n'] += 1
 
         # reaction latency both directions (dated reactions = Telegram). The
         # reactor is the reaction's actor; the reacted-to message's sender is
@@ -781,14 +814,20 @@ def build_connected_data(chats: List[Chat], owner: Any,
                 continue
             msg_ts = r['timestamp_ms']
             sender = r['sender_name']
+            cm = ct['_cm'][r['mon']]
             for actor, rdate in rx:
                 lat = (rdate - msg_ts) / 60000.0
                 if lat < 0 or lat > 7 * 24 * 60:
                     continue
+                lat_s = (rdate - msg_ts) / 1000.0
                 if actor in owners and sender not in owners:
                     ct['_rx_you'].append(lat)      # you react to them
+                    cm['react_you_sum_s'] += lat_s
+                    cm['react_you_n'] += 1
                 elif actor not in owners and sender in owners:
                     ct['_rx_them'].append(lat)     # they react to you
+                    cm['react_them_sum_s'] += lat_s
+                    cm['react_them_n'] += 1
 
         # per-contact monthly total volume (both sides) — dormancy resilience
         for r in c.recs:
@@ -1038,6 +1077,7 @@ def build_connected_data(chats: List[Chat], owner: Any,
                      for m in sorted(type_mix_month)},
         'new_contacts': funnel['new_per_month'],
         'bursts': attention['_bursts_monthly'],
+        'attention': attention['_attention_monthly'],
         'texting_minutes': {m: round(texting_min_month[m], 1) for m in sorted(texting_min_month)},
     }
     weekly = {
@@ -1065,6 +1105,21 @@ def build_connected_data(chats: List[Chat], owner: Any,
     for mon, chat_counter in sent_by_month_contact.items():
         sent_by_month_map[mon] = dict(chat_counter)
 
+    # ---- contact_monthly: per-contact per-month counters (the windowed layer).
+    # { "YYYY-MM": { "<chat_id>": {..nonzero counters..} } }. Only months with
+    # activity get entries; zero counters are omitted to keep the payload lean.
+    contact_monthly: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for cid, ct in contacts.items():
+        for mon, cell in ct['_cm'].items():
+            row: Dict[str, Any] = {}
+            for k, v in cell.items():
+                if not v:
+                    continue
+                row[k] = round(v, 2) if isinstance(v, float) else v
+            if row:
+                contact_monthly.setdefault(mon, {})[cid] = row
+    contact_monthly = {m: contact_monthly[m] for m in sorted(contact_monthly)}
+
     payload = {
         'owner': owner_label,
         'variant': variant,
@@ -1077,6 +1132,9 @@ def build_connected_data(chats: List[Chat], owner: Any,
         'monthly': monthly,
         'weekly': weekly,
         'sent_by_month_contact': sent_by_month_map,
+        'contact_monthly': contact_monthly,
+        'gates': {'min_msgs': min_msgs, 'min_replies': min_replies,
+                  'react_min': REACT_MIN},
         'attention': {k: v for k, v in attention.items() if not k.startswith('_')},
         'contacts': contact_list,
         'leaderboards': {
@@ -1132,6 +1190,27 @@ def build_connected_data(chats: List[Chat], owner: Any,
     return payload
 
 
+# Per-contact per-month counter fields (the ``contact_monthly`` payload block).
+# Every metric the connected UI recomputes over a time window is derived from
+# these — see ``docs/CONNECTED_ANALYSIS.md`` §3.1. All ints except the latency
+# sums (floats). The style tuple (emoji_rate / avg_word_len / language-mix)
+# reuses EXACTLY the all-time mirror/code-switching feature definitions:
+#   emoji_rate    = emoji_sent / sent      (owner emoji per owner msg)
+#   avg_word_len  = o_wlen    / words_sent (owner char/word over real words)
+#   georgian_share= lang_geo  / lang_total (owner real msgs tagged georgian)
+_CM_FIELDS = (
+    'sent', 'recv', 'recv_emoji', 'initiations', 'sessions', 'night_sent',
+    'words_sent', 'turns_sent', 'emoji_sent', 'chars_sent',
+    'reply_lat_sum_min', 'reply_lat_n',
+    'react_you_sum_s', 'react_you_n', 'react_them_sum_s', 'react_them_n',
+    'o_wlen', 'lang_geo', 'lang_total',
+)
+
+
+def _cm_cell() -> Dict[str, float]:
+    return {f: 0 for f in _CM_FIELDS}
+
+
 def _blank_contact(name: str, chat_id: str,
                    platform: str = 'instagram') -> Dict[str, Any]:
     return {
@@ -1143,6 +1222,7 @@ def _blank_contact(name: str, chat_id: str,
         '_o_msgs': 0, '_o_words': 0, '_o_wlen': 0,
         '_o_q': 0, '_o_i': 0, '_o_pos': 0, '_o_em': 0, '_o_lang': Counter(),
         '_c_msgs': 0, '_c_em': 0, '_month_vol': Counter(),
+        '_cm': defaultdict(_cm_cell),
         '_first_ts': None, '_last_ts': None, '_first_sender': None, '_months': set(),
     }
 
@@ -1150,6 +1230,13 @@ def _blank_contact(name: str, chat_id: str,
 def _compute_attention(owner_stream: List[Tuple[int, str]],
                        daily: Dict[str, Any], timezone: str) -> Dict[str, Any]:
     """A. Parallel texting, chat-switch, fragmentation, bursts."""
+    # Per-month attention window stats, so the UI can recompute focus /
+    # parallel-texting / chat-switch / mean burst span over any time window.
+    mstats: Dict[str, Dict[str, Any]] = defaultdict(
+        lambda: {'active_windows': 0, 'juggle_windows': 0, 'adjacent': 0,
+                 'switches': 0, 'burst_count': 0, 'burst_dur_sum_min': 0.0,
+                 '_hours': set()})
+
     # 10-min windows
     windows: Dict[int, set] = defaultdict(set)
     hours_active: set = set()
@@ -1159,6 +1246,15 @@ def _compute_attention(owner_stream: List[Tuple[int, str]],
     active_windows = len(windows)
     juggling = sum(1 for chats in windows.values() if len(chats) >= 2)
     parallel_rate = round(juggling / active_windows, 4) if active_windows else 0.0
+    for win_idx, chats in windows.items():
+        mon = to_datetime(win_idx * PARALLEL_WINDOW_MS, timezone).strftime('%Y-%m')
+        ms = mstats[mon]
+        ms['active_windows'] += 1
+        if len(chats) >= 2:
+            ms['juggle_windows'] += 1
+    for hb in hours_active:
+        mon = to_datetime(hb * 60 * 60 * 1000, timezone).strftime('%Y-%m')
+        mstats[mon]['_hours'].add(hb)
 
     # chat-switch over adjacent (<10 min) consecutive owner messages
     adjacent = switches = 0
@@ -1166,8 +1262,11 @@ def _compute_attention(owner_stream: List[Tuple[int, str]],
         (t0, c0), (t1, c1) = owner_stream[i - 1], owner_stream[i]
         if t1 - t0 < SWITCH_ADJACENT_MS:
             adjacent += 1
+            mon = to_datetime(t1, timezone).strftime('%Y-%m')
+            mstats[mon]['adjacent'] += 1
             if c0 != c1:
                 switches += 1
+                mstats[mon]['switches'] += 1
     active_hours = len(hours_active)
 
     # bursts: maximal runs with gaps < 15 min
@@ -1197,9 +1296,27 @@ def _compute_attention(owner_stream: List[Tuple[int, str]],
         d = to_datetime(s, timezone)
         if d.strftime('%Y-%m-%d') in daily:
             daily[d.strftime('%Y-%m-%d')]['bursts'] += 1
-        monthly[d.strftime('%Y-%m')].append((e - s) / 60000.0)
+        mon = d.strftime('%Y-%m')
+        dur = (e - s) / 60000.0
+        monthly[mon].append(dur)
+        ms = mstats[mon]
+        ms['burst_count'] += 1
+        ms['burst_dur_sum_min'] += dur
     bursts_monthly = {m: {'count': len(v), 'median_min': _median(v)}
                       for m, v in sorted(monthly.items())}
+
+    # finalize per-month attention stats (drop the hour set → its count)
+    attention_monthly: Dict[str, Dict[str, Any]] = {}
+    for mon in sorted(mstats):
+        ms = mstats[mon]
+        attention_monthly[mon] = {
+            'active_windows': ms['active_windows'],
+            'juggle_windows': ms['juggle_windows'],
+            'adjacent': ms['adjacent'], 'switches': ms['switches'],
+            'active_hours': len(ms['_hours']),
+            'burst_count': ms['burst_count'],
+            'burst_dur_sum_min': round(ms['burst_dur_sum_min'], 2),
+        }
 
     return {
         'parallel_texting_rate': parallel_rate,
@@ -1218,6 +1335,7 @@ def _compute_attention(owner_stream: List[Tuple[int, str]],
                              'max': round(max(durations), 3) if durations else 0.0},
         },
         '_bursts_monthly': bursts_monthly,
+        '_attention_monthly': attention_monthly,
     }
 
 
@@ -1305,14 +1423,27 @@ def _groups_lane(groups: List[Chat], owner: Any, timezone: str) -> Dict[str, Any
     per_group = []
     total_owner = total_all = 0
     total_min = 0.0
+    # Per-month group activity so the groups lane responds to the range filter:
+    # { "YYYY-MM": { "<chat_id>": {owner, total, minutes} } }.
+    monthly: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(lambda: defaultdict(
+        lambda: {'owner': 0, 'total': 0, 'minutes': 0.0}))
     for c in groups:
         owner_msgs = sum(1 for r in c.recs if r['sender_name'] in owners and not r['sys'])
         all_msgs = sum(1 for r in c.recs if not r['sys'])
+        for r in c.recs:
+            if r['sys']:
+                continue
+            cell = monthly[r['mon']][c.chat_id]
+            cell['total'] += 1
+            if r['sender_name'] in owners:
+                cell['owner'] += 1
         real_recs = [r for r in c.recs if r['real']]
         minutes = 0.0
         for session in _split_sessions(real_recs):
             if session and any(r['sender_name'] in owners for r in session):
-                minutes += (session[-1]['timestamp_ms'] - session[0]['timestamp_ms']) / 60000.0
+                dur = (session[-1]['timestamp_ms'] - session[0]['timestamp_ms']) / 60000.0
+                minutes += dur
+                monthly[session[0]['mon']][c.chat_id]['minutes'] += dur
         total_owner += owner_msgs
         total_all += all_msgs
         total_min += minutes
@@ -1323,10 +1454,20 @@ def _groups_lane(groups: List[Chat], owner: Any, timezone: str) -> Dict[str, Any
             'members': len(c.participants), 'texting_minutes': round(minutes, 1),
         })
     per_group.sort(key=lambda g: g['messages_owner'], reverse=True)
+    monthly_out = {
+        mon: {cid: {'owner': v['owner'], 'total': v['total'],
+                    'minutes': round(v['minutes'], 1)}
+              for cid, v in sorted(cells.items())}
+        for mon, cells in sorted(monthly.items())
+    }
+    # Static per-group meta the UI needs to render windowed rows (name/platform/
+    # members) keyed by chat_id — kept once, not repeated per month.
+    meta = {g['chat_id']: {'name': g['name'], 'platform': g['platform'],
+                           'members': g['members']} for g in per_group}
     return {
         'count': len(groups), 'messages_owner': total_owner,
         'messages_total': total_all, 'texting_minutes': round(total_min, 1),
-        'per_group': per_group,
+        'per_group': per_group, 'monthly': monthly_out, 'meta': meta,
     }
 
 

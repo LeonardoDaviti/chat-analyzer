@@ -189,16 +189,19 @@ try {
   if (!fullStrips) throw new Error('full range should render all-time strips under charts');
   g(`selectChat(${JSON.stringify(first)})`); flush(); // back to the biggest chat
 
-  // --- Findings empty-state: a chat with no findings shows the empty line.
+  // --- Findings empty-state (Part 4b): a chat whose "Other findings" box would
+  //     be empty must HIDE the whole section entirely — no empty box remains.
   const emptyId = g("(function(){var ins=window.INSIGHTS||{};" +
     "var m=DASHBOARD_MANIFEST.filter(function(x){return !x.is_group && !ins[x.id];})[0];" +
     "return m?m.id:null;})()");
   if (emptyId) {
     g(`selectChat(${JSON.stringify(emptyId)})`); flush();
     const fboxE = byId['findingsBox'] ? byId['findingsBox']._html : '';
-    const isEmpty = /Nothing stands out/.test(fboxE);
-    console.log('findings empty-state | chat:', emptyId, '| emptyStateShown:', isEmpty);
-    if (!isEmpty) throw new Error('finding-less chat did not show the empty state');
+    const secHidden = g("(function(){var s=el('findingsSection');return !!(s&&s.style&&s.style.display==='none');})()");
+    const boxEmpty = !fboxE || !fboxE.trim();
+    console.log('findings empty-state | chat:', emptyId, '| boxEmpty:', boxEmpty, '| sectionHidden:', secHidden);
+    if (!boxEmpty) throw new Error('finding-less chat left content in the Other-findings box');
+    if (!secHidden) throw new Error('finding-less chat did not hide the Other-findings section');
     g(`selectChat(${JSON.stringify(first)})`); flush(); // back to the big chat
   } else {
     console.log('every dyad has findings — empty-state not exercised');
@@ -370,6 +373,53 @@ try {
   const reactCharts = ['cxReactYou', 'cxReactThem'].filter(id => !!g(`charts[${JSON.stringify(id)}]`)).length;
   console.log('connected reaction-latency | youBoard:', nYou, '| themBoard:', nThem, '| chartsDrawn:', reactCharts + '/2');
   if ((nYou > 0 || nThem > 0) && reactCharts < 2) throw new Error('reaction-latency leaderboard charts did not render');
+
+  // --- OWNER DIRECTIVE: no all-time in the connected view; EVERY metric windows.
+  //     (a) the connected skeleton carries no "(all-time)" / "· ALL-TIME" text.
+  const appHtml = byId['app'] ? byId['app']._html : '';
+  const hasAllTime = /\(all-time\)/i.test(appHtml) || /ALL-TIME/.test(appHtml);
+  console.log('connected skeleton | anyAllTimeText:', hasAllTime, '| len:', appHtml.length);
+  if (hasAllTime) throw new Error('connected skeleton still contains "(all-time)"/ALL-TIME text');
+
+  // (b) Reciprocity is now a real (diverging) chart, recomputed windowed.
+  g("applyPreset('all')"); flush();
+  const recipChart = !!g("charts['cxRecip']");
+  console.log('connected reciprocity chart | exists:', recipChart);
+  if (!recipChart) throw new Error('reciprocity diverging chart did not render');
+
+  // (c) The "⧉ Merge contacts" panel is the VERY LAST section (Part 4a): nothing
+  //     with a section-title comes after it.
+  const mpIdx = appHtml.indexOf('connMergePanel');
+  const tailAfterMerge = mpIdx >= 0 ? appHtml.slice(mpIdx) : '';
+  const groupsBeforeMerge = appHtml.indexOf('connGroupsBox') >= 0 && appHtml.indexOf('connGroupsBox') < mpIdx;
+  const nothingAfter = mpIdx >= 0 && tailAfterMerge.indexOf('section-title') === -1;
+  console.log('connected merge-last | mergePanelPresent:', mpIdx >= 0,
+    '| groupsBefore:', groupsBeforeMerge, '| noSectionTitleAfter:', nothingAfter);
+  if (mpIdx < 0) throw new Error('merge panel missing from connected skeleton');
+  if (!groupsBeforeMerge) throw new Error('groups lane should precede the merge panel');
+  if (!nothingAfter) throw new Error('merge panel is not the last section');
+
+  // (d) A range change re-renders the leaderboards with DIFFERENT data: assert a
+  //     setOptions delta AND that a leaderboard's content actually differs
+  //     between the full range and a narrow range. (ECharts SSR getOption() drops
+  //     series data, so we capture the option object passed to setChart instead.)
+  g("window.__optCap={};(function(){var _sc=setChart; setChart=function(id,opt){window.__optCap[id]=opt; return _sc(id,opt);};})();");
+  const lbSig = (id) => "(function(){var o=(window.__optCap||{})['" + id + "'];if(!o)return '';" +
+    "var y=(o.yAxis&&o.yAxis.data)||(o.yAxis&&o.yAxis[0]&&o.yAxis[0].data)||[];" +
+    "var s=(o.series&&o.series[0]&&o.series[0].data)||[];" +
+    "return JSON.stringify([y,s.map(function(d){return d&&d.value!=null?d.value:d;})]);})()";
+  g("applyPreset('all')"); flush();
+  const sigFull = g(lbSig('cxSentL'));
+  const soBefore = g('window.__setOptions');
+  g("applyPreset('90')"); flush();
+  const soAfter = g('window.__setOptions');
+  const sigNarrow = g(lbSig('cxSentL'));
+  console.log('connected range re-render | setOptionsDelta:', soAfter - soBefore,
+    '| leaderboardContentDiffers:', sigFull !== sigNarrow,
+    '| fullLen:', sigFull.length, '| narrowLen:', sigNarrow.length);
+  if (soAfter <= soBefore) throw new Error('connected range change did not re-render (no setOptions delta)');
+  if (!sigFull || sigFull === sigNarrow) throw new Error('connected leaderboard content did not change with the range');
+  g("applyPreset('all')"); flush();
 
   // --- Findings: Connected view renders strips under its charts (or, when a
   //     finding is unanchored, in the Other-findings box).
