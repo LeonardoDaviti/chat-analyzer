@@ -461,13 +461,22 @@ def _pearson(pairs: List[Tuple[float, float]]) -> Optional[float]:
 
 
 def _circadian_overlap(hours_a: List[int], hours_b: List[int]) -> Optional[float]:
-    """Cosine similarity of two 24-bin hour-of-day histograms."""
-    dot = sum(a * b for a, b in zip(hours_a, hours_b))
-    na = sum(a * a for a in hours_a) ** 0.5
-    nb = sum(b * b for b in hours_b) ** 0.5
-    if na == 0 or nb == 0:
+    """Overlap coefficient of two 24-bin hour-of-day histograms.
+
+    ``sum(min(pa_i, pb_i))`` over L1-normalised histograms (range 0..1). This
+    replaces the earlier cosine similarity, which saturated at 0.93-0.9995
+    corpus-wide: two people in one conversation reply to each other and thus
+    share an hour-of-day profile by construction. The overlap coefficient
+    spreads the corpus to ~0.79-0.99, a truer picture, and is what the future
+    circadian card should render. (The ``different-clocks`` rule that consumed
+    it was removed — even the most divergent dyad overlaps ~0.79, so no
+    honest "different clocks" threshold exists. See docs/INSIGHTS.md.)
+    """
+    ta = sum(hours_a)
+    tb = sum(hours_b)
+    if ta == 0 or tb == 0:
         return None
-    return dot / (na * nb)
+    return sum(min(a / ta, b / tb) for a, b in zip(hours_a, hours_b))
 
 
 def _rupture_repair(week_vol: Dict[str, int]) -> Dict[str, Any]:

@@ -877,21 +877,14 @@ def rule_steady_drumbeat(c: ChatCtx) -> Optional[Dict]:
                     sc, conf, c.window, anchor='cVolume', chat_id=c.chat_id)
 
 
-def rule_different_clocks(c: ChatCtx) -> Optional[Dict]:
-    """Metric 7 — circadian overlap low → you live in different hours."""
-    ov = c.extras.get('circadian_overlap')
-    if ov is None or c.n_msgs < MIN_MSGS:
-        return None
-    if ov > 0.75:
-        return None
-    effect = min((0.75 - ov) / 0.75 + 0.3, 1.0)
-    sc, E, V, conf = _score(CATEGORY_WEIGHTS['rhythm'], effect, 1.0, c.n_msgs, MIN_MSGS)
-    sent = (f"You two live in different hours (clock overlap {ov:.2f}) — slow replies "
-            f"here may just be schedules, not distance.")
-    return _finding('different-clocks', 'chat', 'rhythm', 'notable', 'asym',
-                    'Different clocks', sent,
-                    {'overlap': round(ov, 3)},
-                    sc, conf, c.window, anchor='cNight', chat_id=c.chat_id)
+# NOTE: ``rule_different_clocks`` was REMOVED in wave-2 (docs/WAVE2_REVIEW.md
+# Part E item 2). Its input ``circadian_overlap`` — even after switching from
+# cosine similarity to the overlap coefficient — ranges 0.79-0.99 across the
+# corpus (min 0.79, p10 0.83, median 0.92), because two people in one
+# conversation share an hour-of-day profile by construction. No dyad clears a
+# defensible "different clocks" bar, so the rule (and its ``_soften_pursuit``
+# post-pass, likewise removed) could never fire honestly. The metric itself is
+# retained in ``extras.circadian_overlap`` for the future circadian card.
 
 
 def rule_length_mirroring(c: ChatCtx) -> Optional[Dict]:
@@ -1002,7 +995,6 @@ CHAT_RULES: Dict[str, Callable[[ChatCtx], Optional[Dict]]] = {
     'laughing-alone': rule_laughing_alone,
     'feast-and-famine': rule_feast_and_famine,
     'steady-drumbeat': rule_steady_drumbeat,
-    'different-clocks': rule_different_clocks,
     'length-mirroring': rule_length_mirroring,
     'openings-that-land': rule_openings_that_land,
     'rupture-repair': rule_repair,   # emits id quick-repair OR slow-repair
@@ -1302,8 +1294,11 @@ def _owner_style(p: Dict) -> Dict[str, float]:
         msgs += cell.get('msgs', 0)
         words += cell.get('words', 0)
         emoji += cell.get('emoji', 0)
-        hours = cell.get('hours') or []
-        night += sum(hours[0:6]) if hours else 0
+        # Connected daily cells are flat owner cells carrying ``night_msgs`` (no
+        # ``hours`` histogram — that lives only in per-chat daily). The old
+        # ``cell.get('hours')`` therefore always summed to 0, making the night
+        # dimension of ``platform-persona`` dead. Read ``night_msgs`` directly.
+        night += cell.get('night_msgs', 0)
     return {
         'msgs': msgs,
         'emoji_rate': emoji / words if words else 0,
@@ -1495,20 +1490,10 @@ def run_chat(chat_id: str, payload: Dict, owner: str) -> List[Dict]:
             r = None
         if r:
             out.append(r)
-    _soften_pursuit(out)
+    # NOTE: the ``_soften_pursuit`` post-pass (which capped 'asymmetric-pursuit'
+    # severity when 'different-clocks' fired) was removed alongside the
+    # 'different-clocks' rule — see docs/WAVE2_REVIEW.md Part E item 2.
     return _rank_and_cap(out, CHAT_CAP)
-
-
-def _soften_pursuit(findings: List[Dict]) -> None:
-    """Metric 7 post-pass: if 'different-clocks' fired, the pursuit asymmetry may
-    be schedules, not chasing — cap 'asymmetric-pursuit' severity at notable."""
-    ids = {f['id'] for f in findings}
-    if 'different-clocks' not in ids:
-        return
-    for f in findings:
-        if f['id'] == 'asymmetric-pursuit' and f.get('severity') == 'signal':
-            f['severity'] = 'notable'
-            f['softened_by'] = 'different-clocks'
 
 
 def run_connected(payload: Dict,

@@ -30,6 +30,7 @@ Privacy: prints counts / dates / top contact names only — never message text.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections import Counter
 from pathlib import Path
@@ -109,9 +110,27 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def _load_hidden(dash_dir: str) -> set:
+    """Chat ids the user hid in the dashboard (Dashboard/data/hidden.json).
+
+    Single source of truth shared with build_insights.py: hidden chats are
+    excluded from the Connected owner profile on the next re-analyze.
+    """
+    path = Path(dash_dir) / 'data' / 'hidden.json'
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return set()
+    return {x for x in data if isinstance(x, str)} if isinstance(data, list) else set()
+
+
 def _load_platform(kind: str, chat_dirs: List[Path], excludes: List[str],
-                   timezone: str) -> Tuple[List[Chat], int]:
-    """Filter, load and dedup a platform's chat dirs. Returns (chats, excluded)."""
+                   timezone: str, hidden: Optional[set] = None) -> Tuple[List[Chat], int]:
+    """Filter, load and dedup a platform's chat dirs. Returns (chats, excluded).
+
+    Chats whose slug id is in ``hidden`` are dropped (and counted as excluded).
+    """
+    hidden = hidden or set()
     kept_dirs, excluded = [], 0
     for d in chat_dirs:
         if any(e in d.name.lower() for e in excludes):
@@ -125,6 +144,9 @@ def _load_platform(kind: str, chat_dirs: List[Path], excludes: List[str],
     for d in kept_dirs:
         c = loader(d, taken, timezone)
         if c is not None and c.recs:
+            if c.chat_id in hidden:
+                excluded += 1
+                continue
             chats.append(c)
     chats, dropped = dedup_chats(chats)
     excluded += dropped
@@ -178,6 +200,9 @@ def _report(variant: str, payload: Dict, js_path: Path, json_path: Path) -> None
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     excludes = [s.strip().lower() for s in args.exclude.split(',') if s.strip()]
+    hidden = _load_hidden(args.dash_dir)
+    if hidden:
+        print(f'Hidden chats excluded (from {args.dash_dir}/data/hidden.json): {len(hidden)}')
 
     want_ig = args.platform in ('instagram', 'all', 'everything')
     want_tg = args.platform in ('telegram', 'all', 'everything')
@@ -190,7 +215,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # --- Instagram ---
     if want_ig:
         ig_dirs = discover_instagram_chats(args.chats_dir)
-        ig_chats, ig_excluded = _load_platform('instagram', ig_dirs, excludes, args.timezone)
+        ig_chats, ig_excluded = _load_platform('instagram', ig_dirs, excludes, args.timezone, hidden)
         ig_owner = _detect_owner(ig_chats) if ig_chats else None
         print(f'Instagram: {len(ig_dirs)} discovered, {len(ig_chats)} loaded, '
               f'owner {ig_owner!r}.')
@@ -198,7 +223,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # --- Telegram ---
     if want_tg:
         tg_dirs = discover_telegram_chats(args.chats_dir)
-        tg_chats, tg_excluded = _load_platform('telegram', tg_dirs, excludes, args.timezone)
+        tg_chats, tg_excluded = _load_platform('telegram', tg_dirs, excludes, args.timezone, hidden)
         tg_owner = _detect_telegram_owner(tg_chats) if tg_chats else None
         print(f'Telegram:  {len(tg_dirs)} discovered, {len(tg_chats)} loaded, '
               f'owner {tg_owner!r}.')

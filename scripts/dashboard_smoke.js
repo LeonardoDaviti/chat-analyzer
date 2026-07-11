@@ -129,17 +129,67 @@ try {
   g("applyPreset('all')");
   console.log('1v1 presets OK | setOptions:', g('window.__setOptions'));
 
-  // --- Findings: 1v1 chat should lazy-load data/insights.js and render cards.
+  // --- Findings under charts (M2.2): each anchored finding renders as a
+  //     compact strip inside its chart card (host id "fu-<anchor>"); only
+  //     unanchored findings stay in the "Other findings" box. Helper: collect
+  //     all strip HTML from every anchor host.
+  const anchors = g('ANCHOR_IDS');
+  const underHtml = () => { let s = ''; for (const a of anchors) { const h = byId['fu-' + a]; if (h && h._html) s += h._html; } return s; };
+  const ridsIn = (h) => [...String(h).matchAll(/data-rid="([^"]*)"/g)].map(m => m[1]).filter(Boolean);
+
   flush();
-  const fbox1 = byId['findingsBox'] ? byId['findingsBox']._html : '';
-  const has1 = /class="finding /.test(fbox1);
+  const under1 = underHtml();
+  const has1 = /class="fstrip /.test(under1);
   console.log('findings 1v1 | insightsLoaded:', g('!!window.INSIGHTS'),
     '| lazyLoaded insights.js:', scriptsLoaded.includes('data/insights.js'),
-    '| renderedCards:', has1);
-  if (!has1) throw new Error('1v1 Findings section rendered no cards');
+    '| stripsUnderCharts:', has1);
+  if (!has1) throw new Error('1v1 findings rendered no strips under charts');
 
-  // --- Findings empty-state: a chat with no findings shows the empty line,
-  //     not a crash. Pick any dyad absent from window.INSIGHTS.
+  // Pick the biggest 1v1 chat that actually has all-time findings.
+  const bigDyad = g("(function(){var ins=window.INSIGHTS||{};" +
+    "var m=DASHBOARD_MANIFEST.filter(function(x){return !x.is_group && (ins[x.id]||[]).length;})[0];" +
+    "return m?m.id:null;})()") || first;
+  g(`selectChat(${JSON.stringify(bigDyad)})`); flush();
+
+  // Find a narrow preset where windowed daily-table findings actually fire.
+  let winPreset = null;
+  for (const p of ['90', '180', '365']) {
+    const n = g(`(function(){var wf=computeWindowedFindings(state.chat.daily,state.users,` +
+      `addDays(state.fullEnd,-(${p}-1)),state.fullEnd,state.fullStart,state.fullEnd);return wf.length;})()`);
+    if (n > 0) { winPreset = p; break; }
+  }
+  if (winPreset) {
+    g(`applyPreset('${winPreset}')`); flush();
+    const underW = underHtml();
+    const fboxW = byId['findingsBox'] ? byId['findingsBox']._html : '';
+    const winTag = /in this window/.test(underW);
+    const allTag = /all-time/.test(underW);
+    const ridsUnder = ridsIn(underW), ridsOther = ridsIn(fboxW);
+    const allR = ridsUnder.concat(ridsOther);
+    const noDup = allR.length === new Set(allR).size;
+    const otherOnlyUnanchored = ridsOther.every(r => !ridsUnder.includes(r));
+    console.log('windowed strips', winPreset + 'd | chat:', bigDyad,
+      '| inThisWindowTag:', winTag, '| allTimeTag:', allTag,
+      '| ruleIds:', allR.length, '| noDuplicateIds:', noDup,
+      '| otherOnlyUnanchored:', otherOnlyUnanchored);
+    if (!winTag) throw new Error('windowed range shows no "in this window" strip');
+    if (!ridsUnder.length) throw new Error('no finding strips under charts on windowed range');
+    if (!noDup) throw new Error('a rule id appears twice page-wide (dedup failed)');
+    if (!otherOnlyUnanchored) throw new Error('Other-findings box holds an anchored rule id');
+  } else {
+    console.log('no windowed findings fire for bigDyad in tested presets — window tag not asserted');
+  }
+
+  g("applyPreset('all')"); flush();
+  const underF = underHtml();
+  const fullWin = /in this window/.test(underF);
+  const fullStrips = /class="fstrip /.test(underF);
+  console.log('full-range findings | anyWindowedTag:', fullWin, '| stripsUnderCharts:', fullStrips);
+  if (fullWin) throw new Error('full range should not render windowed strips');
+  if (!fullStrips) throw new Error('full range should render all-time strips under charts');
+  g(`selectChat(${JSON.stringify(first)})`); flush(); // back to the biggest chat
+
+  // --- Findings empty-state: a chat with no findings shows the empty line.
   const emptyId = g("(function(){var ins=window.INSIGHTS||{};" +
     "var m=DASHBOARD_MANIFEST.filter(function(x){return !x.is_group && !ins[x.id];})[0];" +
     "return m?m.id:null;})()");
@@ -153,6 +203,48 @@ try {
   } else {
     console.log('every dyad has findings — empty-state not exercised');
   }
+
+  // --- Hide chats (M1.4): hide a visible dyad -> it leaves the visible list and
+  //     appears in the hidden section; unhide restores it.
+  const hideId = g("(function(){var v=visibleManifest().filter(function(m){return !m.is_group && m.id!==state.chatId;});return v.length?v[0].id:null;})()");
+  if (hideId) {
+    const wasVisible = g(`visibleManifest().some(function(m){return m.id===${JSON.stringify(hideId)};})`);
+    g(`hideChat(${JSON.stringify(hideId)})`); flush();
+    const stillVisible = g(`visibleManifest().some(function(m){return m.id===${JSON.stringify(hideId)};})`);
+    const inHidden = g(`hiddenManifest().some(function(m){return m.id===${JSON.stringify(hideId)};})`);
+    console.log('hide chat | id:', hideId, '| wasVisible:', wasVisible,
+      '| leftVisibleList:', !stillVisible, '| inHiddenSection:', inHidden);
+    if (stillVisible) throw new Error('hidden chat still appears in the visible list');
+    if (!inHidden) throw new Error('hidden chat not in the hidden section');
+    g(`unhideChat(${JSON.stringify(hideId)})`); flush();
+    if (!g(`visibleManifest().some(function(m){return m.id===${JSON.stringify(hideId)};})`))
+      throw new Error('unhide did not restore the chat');
+    console.log('unhide restored | visibleCount:', g('visibleManifest().length'));
+  } else {
+    console.log('no spare dyad to hide — hide/unhide not exercised');
+  }
+
+  // --- Compare mode (M2.3): enter compare, select 3 dyads, assert every metric
+  //     chart rendered, then a range change re-renders them.
+  g('selectCompare()'); flush();
+  if (!g('state.isCompare')) throw new Error('compare mode not entered');
+  g('(function(){state.compareIds=[];var ds=visibleManifest().filter(function(m){return !m.is_group;}).slice(0,3);' +
+    'ds.forEach(function(m){toggleCompare(m.id);});})()'); flush();
+  const cmpSel = g('state.compareIds.length');
+  const cmpN = g('CMP_METRICS.length');
+  const cmpCharts = g('CMP_METRICS.filter(function(mt){return !!charts[mt.id];}).length');
+  console.log('compare | selectedDyads:', cmpSel, '| metricCharts:', cmpCharts, '/', cmpN,
+    '| findingsRendered:', /cmp-dyad-row/.test(byId['cmpFindings'] ? byId['cmpFindings']._html : ''));
+  if (cmpSel !== 3) throw new Error('expected exactly 3 selected dyads in compare');
+  if (cmpCharts < cmpN) throw new Error('not every compare metric chart rendered');
+  const cmpBefore = g('window.__setOptions');
+  g("applyPreset('90')"); flush();
+  const cmpAfter = g('window.__setOptions');
+  console.log('compare range change | setOptionsDelta:', cmpAfter - cmpBefore);
+  if (cmpAfter <= cmpBefore) throw new Error('compare did not re-render on range change');
+  g("applyPreset('all')");
+  g(`selectChat(${JSON.stringify(first)})`); flush();
+  if (g('state.isCompare')) throw new Error('compare state did not unwind on chat select');
 
   // group chat (first group in manifest, if any)
   const gid = g('(DASHBOARD_MANIFEST.filter(function(m){return m.is_group;})[0]||{}).id');
@@ -202,13 +294,15 @@ try {
   g("applyPreset('90')");
   console.log('connected preset OK | setOptions:', g('window.__setOptions'));
 
-  // --- Findings: Connected view should render its own finding cards.
+  // --- Findings: Connected view renders strips under its charts (or, when a
+  //     finding is unanchored, in the Other-findings box).
   flush();
+  const underC = underHtml();
   const fboxC = byId['findingsBox'] ? byId['findingsBox']._html : '';
-  const hasC = /class="finding /.test(fboxC) || /Nothing stands out/.test(fboxC);
+  const hasC = /class="fstrip /.test(underC) || /class="findings-empty/.test(fboxC) || /class="fstrip /.test(fboxC);
   console.log('findings connected | rendered:', hasC,
-    '| cards:', /class="finding /.test(fboxC));
-  if (!hasC) throw new Error('Connected Findings section did not render');
+    '| stripsUnderCharts:', /class="fstrip /.test(underC));
+  if (!hasC) throw new Error('Connected Findings did not render');
 
   // Variant switching via the platform filter while in connected mode.
   const hasTg2 = g("MANIFEST.some(function(m){return (m.platform||'instagram')==='telegram';})");

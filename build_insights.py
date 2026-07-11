@@ -71,6 +71,22 @@ def load_manifest(dash_dir: Path) -> List[Dict[str, Any]]:
         return []
 
 
+def load_hidden(dash_dir: Path) -> set:
+    """Chat ids the user hid in the dashboard (Dashboard/data/hidden.json).
+
+    Single source of truth shared with build_connected.py: hidden chats are
+    excluded from the Findings layer on the next re-analyze.
+    """
+    txt = _read(dash_dir / 'data' / 'hidden.json')
+    if not txt:
+        return set()
+    try:
+        data = json.loads(txt)
+    except json.JSONDecodeError:
+        return set()
+    return {x for x in data if isinstance(x, str)} if isinstance(data, list) else set()
+
+
 def load_chat_payload(dash_dir: Path, entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     rel = entry.get('file') or f"data/{entry.get('id')}.js"
     txt = _read(dash_dir / rel)
@@ -160,11 +176,12 @@ def dump_insights_js(insights: Dict[str, Any]) -> str:
 
 def build(dash_dir: Path) -> Dict[str, Any]:
     manifest = load_manifest(dash_dir)
+    hidden = load_hidden(dash_dir)
 
     payloads: Dict[str, Dict[str, Any]] = {}
     for entry in manifest:
         cid = entry.get('id')
-        if not cid:
+        if not cid or cid in hidden:
             continue
         p = load_chat_payload(dash_dir, entry)
         if p is not None:

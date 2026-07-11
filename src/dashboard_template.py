@@ -153,6 +153,49 @@ select:focus,input:focus,.dd-btn:focus{border-color:var(--a)}
 .findings-empty{color:var(--muted);font-size:13px;font-style:italic;
   padding:6px 2px}
 .findings-note{color:var(--faint);font-size:11px;margin-top:2px}
+.findings-block{margin-bottom:14px}
+.findings-block:last-child{margin-bottom:0}
+.findings-header{font-size:11px;text-transform:uppercase;letter-spacing:.6px;
+  color:var(--faint);font-weight:600;margin:2px 0 8px;
+  border-bottom:1px solid var(--border);padding-bottom:4px}
+/* findings-under-charts: compact strips inside a chart card */
+.find-under{display:grid;gap:6px;margin-top:10px}
+.find-under:empty{display:none;margin:0}
+.fstrip{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;
+  border-left:3px solid var(--border);padding:5px 10px;border-radius:6px;
+  background:var(--panel-2);font-size:12px;line-height:1.45}
+.fstrip.sev-signal{border-left-color:var(--accent)}
+.fstrip.sev-notable{border-left-color:var(--b)}
+.fstrip.sev-fun{border-left-color:var(--faint)}
+.fstrip .f-chip{font-size:9px;text-transform:uppercase;letter-spacing:.5px;
+  padding:1px 6px;border-radius:9px;border:1px solid var(--border);color:var(--muted)}
+.fstrip.sev-signal .f-chip{border-color:var(--accent);color:var(--accent)}
+.fstrip-tag{font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:var(--faint)}
+.fstrip-text{flex:1;color:var(--text);min-width:180px}
+.fstrip .f-evidence{font-size:10.5px;color:var(--faint);font-variant-numeric:tabular-nums}
+/* chat-picker hide controls + hidden section */
+.dd-item .dd-hide{color:var(--faint);cursor:pointer;padding:0 4px;font-size:12px;
+  border-radius:4px;flex:0 0 auto}
+.dd-item .dd-hide:hover{color:var(--bad)}
+.dd-hidden-head{font-size:11px;text-transform:uppercase;letter-spacing:.6px;
+  color:var(--faint);cursor:pointer;padding:8px 9px 4px;margin-top:6px;
+  border-top:1px solid var(--border)}
+.dd-hidden-note{font-size:10.5px;color:var(--faint);padding:0 9px 6px;font-style:italic}
+.dd-item .dd-unhide{color:var(--a);cursor:pointer;padding:0 4px;font-size:12px;flex:0 0 auto}
+.dd-item.pinned-compare{border:1px solid var(--b);background:rgba(158,158,158,.08);
+  font-weight:600;margin-bottom:6px}
+.dd-item.pinned-compare:hover,.dd-item.pinned-compare.active{background:rgba(158,158,158,.16)}
+/* compare mode */
+.cmp-pick{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px}
+.cmp-opt{display:flex;align-items:center;gap:6px;padding:5px 10px;border-radius:14px;
+  border:1px solid var(--border);background:var(--panel);cursor:pointer;font-size:12px;user-select:none}
+.cmp-opt.on{border-color:var(--a)}
+.cmp-opt .swatch{width:9px;height:9px;border-radius:2px;display:inline-block}
+.cmp-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.cmp-chip{font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid var(--border);
+  color:var(--muted);background:var(--panel-2)}
+.cmp-dyad-row{margin:8px 0}
+.cmp-dyad-name{font-size:12px;font-weight:600;margin-bottom:2px;display:flex;align-items:center;gap:6px}
 </style>
 </head>
 <body data-palette="#4DB6AC,#9E9E9E">
@@ -231,6 +274,7 @@ var DATA = window.DASHBOARD_DATA = window.DASHBOARD_DATA || {};
 var state = {
   chatId:null, chat:null, isGroup:false,
   isConnected:false, connected:null, connectedVariant:'all', // owner cross-chat ("You — Connected") mode
+  isCompare:false, compareIds:[],   // "⚖ Compare" mode — selected dyad chat ids
   users:[null,null],
   fullStart:null, fullEnd:null,   // Date objects (chat extent)
   start:null, end:null,           // Date objects (active range)
@@ -372,7 +416,7 @@ window.addEventListener('resize',function(){ for(var k in charts){ try{charts[k]
  * ============================================================ */
 function renderSkeleton(){
   var A=state.users[0]||'A', B=state.users[1]||'B';
-  el('app').innerHTML =
+  el('app').innerHTML = injectStripHosts(
   section('Pulse','<div class="grid kpis" id="kpiRow"></div>')
   + section('Story timeline',
       card('Message volume','A above the line, partner mirrored below · change-points marked',
@@ -424,7 +468,7 @@ function renderSkeleton(){
         '<div class="diff" id="shiftList"></div>'))
   + findingsSection()
   + section('All-time lifetime metrics',
-      '<div class="grid cols-2" id="ltCards"></div>');
+      '<div class="grid cols-2" id="ltCards"></div>'));
 }
 /* Telegram-only section — rendered only when the loaded chat carries Telegram
    signals. Instagram chats get an empty string, so their layout is unchanged. */
@@ -493,6 +537,7 @@ function esc(s){var d=document.createElement('div');d.textContent=(s==null?'':St
 /* ============================================================ *
  * FINDINGS ("Insights") — lazy-loaded from data/insights.js.
  * Precomputed all-time findings (Tier 1). Graceful when absent.
+ * Windowed recompute for daily-table rules (docs/INSIGHTS.md §3.3).
  * ============================================================ */
 var INSIGHTS_STATE = {loaded:false, loading:false, cbs:[]};
 function ensureInsights(cb){
@@ -510,7 +555,27 @@ function ensureInsights(cb){
   document.body.appendChild(s);
 }
 function findingsSection(){
-  return section('📋 Findings','<div id="findingsBox"><div class="findings-empty">Reading the room…</div></div>');
+  return section('📋 Other findings','<div id="findingsBox"><div class="findings-empty">Reading the room…</div></div>');
+}
+/* Anchor ids that findings attach to. Each gets a strip host (id "fu-<anchor>")
+   injected right after its chart/box in the skeleton, so an anchored finding can
+   render as a compact strip UNDER the chart it belongs to (M2.2). Any finding
+   whose anchor is not present on the current page falls back to the "Other
+   findings" box. */
+var ANCHOR_IDS=['cVolume','cCal','cInit','cQ','cDepth','cTurns','cEmoji','cMedia',
+  'cNight','cEnd','cRestart','cWait','cWe','cSent','cLSM','courtesyBox','cTgEdit',
+  'cxFunnel','cxDyn','cxLatL','cxFocus','cxTypeMix','cxNightL','cxInitL','cxGini',
+  'cxBurstDur','connRecipBox','connMirrorBox'];
+var ANCHOR_SET={}; (function(){for(var i=0;i<ANCHOR_IDS.length;i++)ANCHOR_SET[ANCHOR_IDS[i]]=1;})();
+/* Inject a strip host after each anchor-target's (empty) div in a skeleton HTML
+   string. Targets are always empty divs ending in `></div>`. */
+function injectStripHosts(html){
+  return html.replace(/id="([A-Za-z][\w]*)"[^>]*><\/div>/g, function(m,id){
+    return ANCHOR_SET[id] ? m+'<div class="find-under" id="fu-'+id+'"></div>' : m;
+  });
+}
+function clearStripHosts(){
+  for(var i=0;i<ANCHOR_IDS.length;i++){ var h=el('fu-'+ANCHOR_IDS[i]); if(h) h.innerHTML=''; }
 }
 function fEvidenceLine(f){
   var ev=f.evidence||{}, parts=[];
@@ -523,46 +588,315 @@ function fEvidenceLine(f){
   }
   return parts.slice(0,4).join(' · ');
 }
+function fCard(f){
+  var sev=(f.severity==='signal'||f.severity==='notable'||f.severity==='fun')?f.severity:'notable';
+  var anchor=f.anchor&&el(f.anchor)?f.anchor:null;
+  return '<div class="finding sev-'+sev+'" data-rid="'+esc(f.id||'')+'">'
+    +'<div class="f-head"><span class="f-chip">'+esc(f.severity||'')+'</span>'
+    +'<span class="f-title">'+esc(f.title||'')+'</span></div>'
+    +'<div class="f-sentence">'+esc(f.sentence||'')+'</div>'
+    +'<div class="f-foot">'
+    +'<span class="f-evidence">'+fEvidenceLine(f)+'</span>'
+    +(anchor?'<button class="f-showme" data-anchor="'+esc(anchor)+'">show me →</button>':'')
+    +'</div></div>';
+}
+/* Compact strip for a finding rendered directly under its chart (M2.2):
+   severity chip + a "in this window"/"all-time" tag + sentence + evidence,
+   no card chrome. */
+function fStrip(f,tag){
+  var sev=(f.severity==='signal'||f.severity==='notable'||f.severity==='fun')?f.severity:'notable';
+  var ev=fEvidenceLine(f);
+  return '<div class="fstrip sev-'+sev+'" data-rid="'+esc(f.id||'')+'">'
+    +'<span class="f-chip">'+esc(f.severity||'')+'</span>'
+    +(tag?'<span class="fstrip-tag">'+esc(tag)+'</span>':'')
+    +'<span class="fstrip-text">'+esc(f.sentence||'')+'</span>'
+    +(ev?'<span class="f-evidence">'+ev+'</span>':'')
+    +'</div>';
+}
+/* PARITY-BEGIN — windowed daily-table findings engine.
+ *
+ * Mirrors a subset of Python's WINDOWABLE_RULE_IDS (see src/insights_engine.py).
+ * Self-contained on purpose: tests/test_parity.py extracts the code between the
+ * PARITY-BEGIN / PARITY-END markers and runs it under node against the same
+ * synthetic daily tables the Python engine sees, so the two agree at the full
+ * range (where the proportional gate scale == 1). Keep this block free of DOM /
+ * `state` references — renderFindings (below the markers) is the only bridge to
+ * the page.
+ *
+ * JS-mirrored rules — pure within-window aggregates over the daily table:
+ *   question-imbalance, gottman-ratio, courtesy-asymmetry, media-reciprocity-gap,
+ *   depth-mismatch, eager-waiter, left-on-react, unanswered-bids.
+ * NOT mirrored (stay all-time only, from Python lifetime/extras or a
+ * first-half-vs-second-half-of-LIFE comparison that is meaningless in a short
+ * sub-window): monologue-drift, night-migration, we-ness-shift, feast-and-famine,
+ * steady-drumbeat, and every non-windowable rule. See docs/INSIGHTS.md
+ * "Window-awareness".
+ */
+var JS_MIN_BASE_RATE = 0.02;   // ratios only when both base rates >= 2%
+var JS_MIN_SESSIONS = 60;      // depth-mismatch session gate (full)
+var JS_MIN_MSGS = 500;         // global gate (mirrors Python MIN_MSGS)
+
+function _wParseYMD(s){var p=s.split('-');return Date.UTC(+p[0],+p[1]-1,+p[2]);}
+function _wFmtDay(ms){var d=new Date(ms);function p(n){return (n<10?'0':'')+n;}
+  return d.getUTCFullYear()+'-'+p(d.getUTCMonth()+1)+'-'+p(d.getUTCDate());}
+function _wPct(v){return (v*100).toFixed(0)+'%';}
+function _wX(r){return r.toFixed(1)+'×';}
+
+/* Fields the mirrored rules read; summed per user over the window (and over the
+   window's first/second active-day halves for depth-mismatch stability). */
+var _WIN_FIELDS = ['msgs','words','questions','questions_answered','pos_words',
+  'neg_words','gratitude','apology','photos','videos','voice','turns',
+  'reacted_leave','wait_reply_sum_min','wait_reply_n','initiations'];
+function _wZero(){var o={};for(var i=0;i<_WIN_FIELDS.length;i++)o[_WIN_FIELDS[i]]=0;return o;}
+function _wAdd(acc,cell){for(var i=0;i<_WIN_FIELDS.length;i++){var f=_WIN_FIELDS[i];acc[f]+=(cell[f]||0);}}
+
+/* Build the window context in [sdMs,edMs]. The active-day halves (mid =
+   floor(nDays/2)) match Python ChatCtx.h1/h2 exactly, so depth-mismatch's
+   stability check ports 1:1. `fullDays` is the whole-history span; the gate
+   scale = clamp(rangeDays/fullDays, 0.25, 1) so short windows get proportionally
+   lower volume gates (25% floor) and the full range gets scale 1. */
+function buildWinCtx(daily, users, sdMs, edMs, fullDays){
+  var a=users[0], b=users[1];
+  var days=[];
+  for(var dk in daily){ var t=_wParseYMD(dk); if(t>=sdMs&&t<=edMs) days.push(dk); }
+  days.sort();
+  var tot={}, h1={}, h2={}, months={};
+  tot[a]=_wZero(); tot[b]=_wZero(); h1[a]=_wZero(); h1[b]=_wZero(); h2[a]=_wZero(); h2[b]=_wZero();
+  var mid=Math.floor(days.length/2);
+  for(var di=0; di<days.length; di++){
+    var c=daily[days[di]]; months[days[di].slice(0,7)]=1;
+    var half=(di<mid)?h1:h2;
+    for(var ui=0; ui<2; ui++){ var u=users[ui], cell=c[u]; if(!cell) continue;
+      _wAdd(tot[u],cell); _wAdd(half[u],cell); }
+  }
+  var rangeDays=Math.round((edMs-sdMs)/86400000)+1;
+  var fd=fullDays||rangeDays;
+  return {users:users, tot:tot, h1:h1, h2:h2,
+    nMsgs:tot[a].msgs+tot[b].msgs,
+    nSessions:tot[a].initiations+tot[b].initiations,
+    nMonths:Object.keys(months).length,
+    gateScale:Math.max(0.25, Math.min(rangeDays/fd, 1))};
+}
+function wGate(ctx, fullGate){ return fullGate*ctx.gateScale; }  // floored at 25% of the full gate
+
+function _mkFinding(id,category,severity,title,sentence,evidence,anchor){
+  return {id:id,scope:'chat',category:category,severity:severity,
+    title:title,sentence:sentence,evidence:evidence,anchor:anchor};
+}
+
+/* --- Rule ports. Ratio/rate thresholds are effect sizes (never scaled); only
+   count/volume gates pass through wGate(). --- */
+function jsQuestionImbalance(ctx){   // who ASKS more (asking-rate ratio >= 2x)
+  var u=ctx.users,a=u[0],b=u[1],t=ctx.tot;
+  if(t[a].msgs < wGate(ctx,100) || t[b].msgs < wGate(ctx,100)) return null;
+  var qa=t[a].msgs?t[a].questions/t[a].msgs:0, qb=t[b].msgs?t[b].questions/t[b].msgs:0;
+  var cand=[[a,qa,qb],[b,qb,qa]];
+  for(var i=0;i<2;i++){ var X=cand[i][0],qx=cand[i][1],qy=cand[i][2];
+    if(qx<JS_MIN_BASE_RATE||qy<JS_MIN_BASE_RATE) continue;
+    if(qx>=2*qy){ var ratio=qx/qy;
+      return _mkFinding('question-imbalance','dynamics','notable','One asks, one answers',
+        X+' asks '+_wX(ratio)+' more questions per message.',
+        {asker:X,q_rate:Math.round(qx*1e4)/1e4,partner_q_rate:Math.round(qy*1e4)/1e4,ratio:Math.round(ratio*100)/100},'cQ'); } }
+  return null;
+}
+function jsGottmanRatio(ctx){
+  var u=ctx.users,a=u[0],b=u[1],t=ctx.tot;
+  var pos=t[a].pos_words+t[b].pos_words, neg=t[a].neg_words+t[b].neg_words;
+  if(pos+neg < wGate(ctx,300) || neg < wGate(ctx,5)) return null;
+  var ratio=pos/neg;
+  if(ratio>=5 && ratio<=8) return null;
+  var below=ratio<5, effect=below?(5-ratio)/5:Math.min((ratio-8)/8,1);
+  if(effect<=0) return null;
+  return _mkFinding('gottman-ratio','language','signal','Positivity balance',
+    'Warm words outnumber cold ones '+ratio.toFixed(1)+':1 — '+(below?'below':'above')+' the 5:1 line.',
+    {pos_neg_ratio:Math.round(ratio*100)/100,pos_words:pos,neg_words:neg},'cSent');
+}
+function jsCourtesyAsymmetry(ctx){
+  var u=ctx.users,a=u[0],b=u[1],t=ctx.tot;
+  var ca=t[a].gratitude+t[a].apology, cb=t[b].gratitude+t[b].apology;
+  if(ca+cb < wGate(ctx,40)) return null;
+  var ra=t[a].msgs?ca/t[a].msgs:0, rb=t[b].msgs?cb/t[b].msgs:0;
+  var cand=[[a,ra,rb],[b,rb,ra]];
+  for(var i=0;i<2;i++){ var X=cand[i][0],rx=cand[i][1],ry=cand[i][2];
+    if(ry<=0) continue;
+    if(rx>=2.5*ry){ var ratio=rx/ry;
+      return _mkFinding('courtesy-asymmetry','language','notable','Courtesy gap',
+        X+' says thanks or sorry '+_wX(ratio)+' more often.',
+        {polite:X,rate:Math.round(rx*1e4)/1e4,partner_rate:Math.round(ry*1e4)/1e4,ratio:Math.round(ratio*100)/100},'courtesyBox'); } }
+  return null;
+}
+function jsMediaReciprocity(ctx){
+  var u=ctx.users,a=u[0],b=u[1],t=ctx.tot;
+  var ma=t[a].photos+t[a].videos+t[a].voice, mb=t[b].photos+t[b].videos+t[b].voice;
+  if(ma+mb < wGate(ctx,60)) return null;
+  var cand=[[a,b,ma,mb],[b,a,mb,ma]];
+  for(var i=0;i<2;i++){ var X=cand[i][0],Y=cand[i][1],mx=cand[i][2],my=cand[i][3];
+    if(my<=0) continue;
+    if(mx>=3*my){ var ratio=mx/my;
+      return _mkFinding('media-reciprocity-gap','rhythm','fun','One sends the media',
+        X+' sends the photos and voice notes; '+Y+' answers in text ('+Math.round(mx)+' vs '+Math.round(my)+').',
+        {sender:X,media:Math.round(mx),partner_media:Math.round(my),ratio:Math.round(ratio*100)/100},'cMedia'); } }
+  return null;
+}
+function jsDepthMismatch(ctx){
+  var u=ctx.users,a=u[0],b=u[1],t=ctx.tot;
+  if(ctx.nSessions < wGate(ctx,JS_MIN_SESSIONS)) return null;
+  function wpt(cell){return cell.turns?cell.words/cell.turns:0;}
+  var da=wpt(t[a]), db=wpt(t[b]);
+  var cand=[[a,b,da,db],[b,a,db,da]];
+  for(var i=0;i<2;i++){ var X=cand[i][0],Y=cand[i][1],dx=cand[i][2],dy=cand[i][3];
+    if(dy<=0) continue;
+    if(dx>=1.8*dy){
+      var h1y=wpt(ctx.h1[Y]), h2y=wpt(ctx.h2[Y]);
+      var r1=h1y?wpt(ctx.h1[X])/h1y:0, r2=h2y?wpt(ctx.h2[X])/h2y:0;
+      if(Math.min(r1,r2) < 1.5) continue;   // stability: both halves keep the gap
+      var ratio=dx/dy;
+      return _mkFinding('depth-mismatch','dynamics','notable','Essays vs one-liners',
+        X+' writes '+_wX(ratio)+' more per turn — one sends essays, the other sends lines.',
+        {writer:X,words_per_turn:Math.round(dx*10)/10,partner_words_per_turn:Math.round(dy*10)/10,ratio:Math.round(ratio*100)/100},'cDepth'); } }
+  return null;
+}
+function jsEagerWaiter(ctx){
+  var u=ctx.users,a=u[0],b=u[1],t=ctx.tot;
+  var na=t[a].wait_reply_n, nb=t[b].wait_reply_n;
+  if(na < wGate(ctx,30) || nb < wGate(ctx,30)) return null;
+  var ma=na?t[a].wait_reply_sum_min/na:0, mb=nb?t[b].wait_reply_sum_min/nb:0;
+  var cand=[[a,ma,mb],[b,mb,ma]];
+  for(var i=0;i<2;i++){ var X=cand[i][0],mx=cand[i][1],my=cand[i][2];
+    if(mx<=5.0 && my>0 && mx<=0.5*my){
+      return _mkFinding('eager-waiter','dynamics','notable','Waiting by the phone',
+        X+' answers within ~'+mx.toFixed(0)+' min after long silences (vs ~'+my.toFixed(0)+' min) — keeps the chat open.',
+        {waiter:X,reply_min:Math.round(mx*10)/10,partner_reply_min:Math.round(my*10)/10,n_waits:Math.round(Math.min(na,nb))},'cWait'); } }
+  return null;
+}
+function jsLeftOnReact(ctx){
+  var u=ctx.users,a=u[0],b=u[1],t=ctx.tot;
+  var ra=t[a].reacted_leave, rb=t[b].reacted_leave;
+  if(ra+rb < wGate(ctx,40)) return null;
+  var cand=[[a,b,ra,rb],[b,a,rb,ra]];
+  for(var i=0;i<2;i++){ var X=cand[i][0],Y=cand[i][1],rx=cand[i][2],ry=cand[i][3];
+    if(ry<=0) continue;
+    if(rx>=2*ry && rx>=wGate(ctx,20)){ var ratio=rx/ry;
+      return _mkFinding('left-on-react','dynamics','notable','Exit by reaction',
+        'When '+X+' exits a conversation, it’s often with just a reaction — '+Math.round(rx)+' times vs '+Math.round(ry)+'.',
+        {leaver:X,reacted_leaves:Math.round(rx),partner_reacted_leaves:Math.round(ry),ratio:Math.round(ratio*100)/100},'cRestart'); } }
+  return null;
+}
+function jsUnansweredBids(ctx){   // who gets ANSWERED less (answer-rate <= 0.6x)
+  var u=ctx.users,a=u[0],b=u[1],t=ctx.tot;
+  var qa=t[a].questions, qb=t[b].questions;
+  if(qa < wGate(ctx,40) || qb < wGate(ctx,40)) return null;
+  var ra=qa?t[a].questions_answered/qa:0, rb=qb?t[b].questions_answered/qb:0;
+  var cand=[[a,b,ra,rb],[b,a,rb,ra]];
+  for(var i=0;i<2;i++){ var X=cand[i][0],Y=cand[i][1],rx=cand[i][2],ry=cand[i][3];
+    if(ry<=0) continue;
+    if(rx<=0.6*ry){ var hang=1-rx;
+      return _mkFinding('unanswered-bids','dynamics','signal','Questions left hanging',
+        Y+' leaves '+_wPct(hang)+' of '+X+'’s questions hanging — answered far less than the other way round.',
+        {asker:X,answer_rate:Math.round(rx*1e3)/1e3,partner_answer_rate:Math.round(ry*1e3)/1e3,n_questions:Math.round(qa+qb)},'cQ'); } }
+  return null;
+}
+
+/* Registry — the exact set tests/test_parity.py checks against the Python
+   engine. Keep in sync with PARITY_RULES there. */
+var JS_WINDOWABLE_RULES = {
+  'question-imbalance': jsQuestionImbalance,
+  'gottman-ratio': jsGottmanRatio,
+  'courtesy-asymmetry': jsCourtesyAsymmetry,
+  'media-reciprocity-gap': jsMediaReciprocity,
+  'depth-mismatch': jsDepthMismatch,
+  'eager-waiter': jsEagerWaiter,
+  'left-on-react': jsLeftOnReact,
+  'unanswered-bids': jsUnansweredBids
+};
+
+/* Run all mirrored rules over [sd,ed]. `fullStart/fullEnd` bound the chat's
+   whole history; when the selected window equals it the gate scale is 1 and the
+   output matches the Python engine. Windowed findings carry no `score` (v1):
+   ordering is severity, then rule id — deterministic. sd/ed/fullStart/fullEnd
+   accept Date objects or epoch-ms. */
+function computeWindowedFindings(daily, users, sd, ed, fullStart, fullEnd){
+  if(!daily || !users || users.length!==2) return [];
+  var sdMs=(sd instanceof Date)?sd.getTime():sd, edMs=(ed instanceof Date)?ed.getTime():ed;
+  var fs=fullStart!=null?((fullStart instanceof Date)?fullStart.getTime():fullStart):sdMs;
+  var fe=fullEnd!=null?((fullEnd instanceof Date)?fullEnd.getTime():fullEnd):edMs;
+  var fullDays=Math.round((fe-fs)/86400000)+1;
+  var ctx=buildWinCtx(daily, users, sdMs, edMs, fullDays);
+  if(ctx.nMsgs < wGate(ctx,JS_MIN_MSGS)) return [];
+  var out=[];
+  for(var rid in JS_WINDOWABLE_RULES){
+    var f=null;
+    try{ f=JS_WINDOWABLE_RULES[rid](ctx); }
+    catch(e){ if(typeof console!=='undefined'&&console.error) console.error('windowed rule '+rid+' failed:',e); }
+    if(f){ f.window={from:_wFmtDay(sdMs),to:_wFmtDay(edMs)}; out.push(f); }
+  }
+  var sev={signal:0,notable:1,fun:2};
+  out.sort(function(x,y){var sx=(x.severity in sev)?sev[x.severity]:1, sy=(y.severity in sev)?sev[y.severity]:1;
+    return sx-sy || x.id.localeCompare(y.id);});
+  return out;
+}
+/* PARITY-END */
+
 /* Render findings for the current scope into #findingsBox.
-   scopeKey: a chat id, or 'connected:<variant>'. */
+   scopeKey: a chat id, or 'connected:<variant>'. Two blocks:
+     - "In this window (…)": windowed daily-table rules, recomputed for the
+       selected range. Rendered only when the range is NARROWER than the full
+       history (full range => all-time is the same story, so it is skipped).
+     - "All-time (full history)": from insights.js. A rule id already shown in
+       the window block is skipped here (dedup) — the all-time story is implied.
+   Connected scope is all-time only (windowed is out of scope this wave). */
 function renderFindings(scopeKey){
-  var box=el('findingsBox'); if(!box) return;
-  var all=window.INSIGHTS||{};
-  var list;
-  if(scopeKey.indexOf('connected:')===0){
-    var v=scopeKey.slice('connected:'.length);
-    list=((all.connected||{})[v])||[];
-  } else {
-    list=all[scopeKey]||[];
+  var box=el('findingsBox');
+  clearStripHosts();
+  var isConnected = scopeKey.indexOf('connected:')===0;
+  var winIds={};                 // rule ids shown in a window strip
+  var hostHtml={};               // 'fu-<anchor>' -> accumulated strip HTML
+  var other=[];                  // strips with no resolvable on-page anchor
+  var placedAnchored=false;
+  function place(f,tag){
+    var anchor=f.anchor;
+    var host = anchor ? el('fu-'+anchor) : null;
+    if(host){ var k='fu-'+anchor; hostHtml[k]=(hostHtml[k]||'')+fStrip(f,tag); placedAnchored=true; }
+    else { other.push(fStrip(f,tag)); }
   }
-  if(!list.length){
-    box.innerHTML='<div class="findings-empty">Nothing stands out in this window — that’s a finding too.</div>';
-    return;
+  // 1) Windowed daily-table findings (chat scope, only when the range is
+  //    narrower than the full history). These get the "in this window" tag and
+  //    replace any all-time finding of the same rule id.
+  if(!isConnected && state.chat && state.users && state.users.length===2){
+    var full = state.fullStart && state.fullEnd && state.start && state.end &&
+      state.start.getTime()<=state.fullStart.getTime() &&
+      state.end.getTime()>=state.fullEnd.getTime();
+    if(!full){
+      var wf=computeWindowedFindings(state.chat.daily||{}, state.users,
+        state.start, state.end, state.fullStart, state.fullEnd);
+      for(var i=0;i<wf.length;i++){ winIds[wf[i].id]=1; place(wf[i],'in this window'); }
+    }
   }
-  var html='<div class="findings">';
-  for(var i=0;i<list.length;i++){
-    var f=list[i];
-    var sev=(f.severity==='signal'||f.severity==='notable'||f.severity==='fun')?f.severity:'notable';
-    var anchor=f.anchor&&el(f.anchor)?f.anchor:null;
-    html+='<div class="finding sev-'+sev+'">'
-      +'<div class="f-head"><span class="f-chip">'+esc(f.severity||'')+'</span>'
-      +'<span class="f-title">'+esc(f.title||'')+'</span></div>'
-      +'<div class="f-sentence">'+esc(f.sentence||'')+'</div>'
-      +'<div class="f-foot">'
-      +'<span class="f-evidence">'+fEvidenceLine(f)+'</span>'
-      +(anchor?'<button class="f-showme" data-anchor="'+esc(anchor)+'">show me →</button>':'')
-      +'</div></div>';
+  // 2) All-time findings from insights.js (deduped against the window block).
+  var all=window.INSIGHTS||{}, allList;
+  if(isConnected){ var v=scopeKey.slice('connected:'.length); allList=((all.connected||{})[v])||[]; }
+  else { allList=all[scopeKey]||[]; }
+  for(var j=0;j<allList.length;j++){ if(winIds[allList[j].id]) continue; place(allList[j],'all-time'); }
+  // 3) Write strips into their chart-card hosts.
+  for(var hid in hostHtml){ var h=el(hid); if(h) h.innerHTML=hostHtml[hid]; }
+  // 4) "Other findings" box holds only findings with no chart on this page.
+  if(box){
+    if(other.length){
+      var note = isConnected ? '<div class="findings-note">Connected findings are all-time.</div>' : '';
+      box.innerHTML=note+'<div class="findings">'+other.join('')+'</div>';
+    } else if(placedAnchored){
+      box.innerHTML='<div class="findings-empty">Every finding is shown under its chart above.</div>';
+    } else {
+      box.innerHTML='<div class="findings-empty">Nothing stands out yet.</div>';
+    }
   }
-  html+='</div><div class="findings-note">All-time findings across this chat’s full history.</div>';
-  box.innerHTML=html;
-  var btns=box.querySelectorAll?box.querySelectorAll('.f-showme'):[];
-  Array.prototype.forEach.call(btns,function(btn){
-    btn.onclick=function(){ var a=btn.getAttribute('data-anchor'); var node=el(a);
-      if(node&&node.scrollIntoView) node.scrollIntoView({behavior:'smooth',block:'center'}); };
-  });
 }
 function loadAndRenderFindings(scopeKey){
-  ensureInsights(function(){ try{ renderFindings(scopeKey); }catch(e){} });
+  ensureInsights(function(){ try{ renderFindings(scopeKey); }catch(e){ try{console.error('renderFindings failed:',e);}catch(_){} } });
+  /* Windowed findings render even before insights.js resolves. */
+  if(scopeKey.indexOf('connected:')!==0){
+    try{ renderFindings(scopeKey); }catch(e){}
+  }
 }
 
 /* ============================================================ *
@@ -588,6 +922,12 @@ function renderAll(){
   safe(renderLanguage,'language');
   safe(function(){renderTelegram(rt);},'telegram');
   safe(function(){renderShifts(rt);},'shifts');
+  // Findings: windowed recompute for daily-table rules + all-time from insights.js.
+  safe(function(){
+    if(el('findingsBox')&&state.chat&&state.users&&state.users.length===2){
+      try{renderFindings(state.chatId);}catch(e){}
+    }
+  },'findings');
   // Lifetime + turn-hist cards are range-independent; rendered per chat.
 }
 /* One broken chart must never take down the rest of the page. */
@@ -814,6 +1154,12 @@ function renderAllExceptVolumeZoom(){
   safe(function(){renderPsycho(b,rt);},'psycho');
   safe(renderLanguage,'language');
   safe(function(){renderShifts(rt);},'shifts');
+  // Findings: windowed recompute for daily-table rules.
+  safe(function(){
+    if(el('findingsBox')&&state.chat&&state.users&&state.users.length===2){
+      try{renderFindings(state.chatId);}catch(e){}
+    }
+  },'findings');
 }
 function clampDate(d){
   var t=d.getTime();
@@ -1837,7 +2183,8 @@ function renderGroupShifts(rt,members){
 
 /* Dispatch between the 1v1 and group render pipelines. */
 function rerender(){
-  if(state.isConnected) renderAllConnected();
+  if(state.isCompare) renderCompare();
+  else if(state.isConnected) renderAllConnected();
   else if(state.isGroup) renderAllGroup();
   else renderAll();
 }
@@ -1901,7 +2248,7 @@ function connWeekKeys(series){ // weekly keys whose week overlaps the active ran
 
 function renderSkeletonConnected(){
   var owner=state.connected.owner||'You';
-  el('app').innerHTML =
+  el('app').innerHTML = injectStripHosts(
   '<div class="section" style="padding-bottom:0"><div id="connVariantNote" class="sub" style="font-size:13px"></div></div>'
   + section('Pulse — '+owner+' across every chat','<div class="grid kpis" id="kpiRow"></div>')
   + section('Attention & texting span',
@@ -1938,7 +2285,7 @@ function renderSkeletonConnected(){
       + '</div>')
   + findingsSection()
   + section('Groups lane',
-      card('Group chats','Kept separate so groups never pollute the contact rankings (all-time)','<div id="connGroupsBox" style="min-height:80px"></div>'));
+      card('Group chats','Kept separate so groups never pollute the contact rankings (all-time)','<div id="connGroupsBox" style="min-height:80px"></div>')));
 }
 
 /* Prepend the platform badge to a leaderboard/contact row name in the merged
@@ -2381,7 +2728,58 @@ function pfLabel(p){ return p==='telegram'?'✈️ Telegram':(p==='instagram'?'�
 function platformVisible(m){
   return !(selectedPlatforms&&selectedPlatforms.size)||selectedPlatforms.has(pfOf(m));
 }
-function visibleManifest(){ return MANIFEST.filter(platformVisible); }
+/* ---------- hidden chats (M1.4) ----------
+   Persisted to Dashboard/data/hidden.json via the launcher's /hidden route when
+   served over http, AND to localStorage as a file:// fallback. On load we read
+   BOTH and union them. build_connected.py / build_insights.py read the same
+   hidden.json and drop those chats on the next re-analyze. */
+var HIDDEN={};                     // id -> 1
+function isHidden(m){ return !!HIDDEN[m.id]; }
+function hiddenManifest(){ return MANIFEST.filter(isHidden); }
+function hiddenIds(){ var a=[]; for(var k in HIDDEN) a.push(k); return a; }
+function loadHidden(cb){
+  // localStorage fallback (works on file://)
+  try{ if(typeof localStorage!=='undefined'){
+    var ls=JSON.parse(localStorage.getItem('hiddenChats')||'[]');
+    if(ls&&ls.length) ls.forEach(function(id){HIDDEN[id]=1;});
+  }}catch(e){}
+  // launcher route (http only) — union in whatever it has, then refresh UI
+  try{ if(typeof XMLHttpRequest!=='undefined'){
+    var x=new XMLHttpRequest(); x.open('GET','/hidden',true);
+    x.onreadystatechange=function(){ if(x.readyState===4){
+      if(x.status===200){ try{ var arr=JSON.parse(x.responseText);
+        if(arr&&arr.length){ arr.forEach(function(id){HIDDEN[id]=1;}); if(cb) cb(); } }catch(e){} }
+    }};
+    x.send();
+  }}catch(e){}
+}
+function persistHidden(){
+  var arr=hiddenIds();
+  try{ if(typeof localStorage!=='undefined') localStorage.setItem('hiddenChats',JSON.stringify(arr)); }catch(e){}
+  try{ if(typeof XMLHttpRequest!=='undefined'){
+    var x=new XMLHttpRequest(); x.open('POST','/hidden',true);
+    x.setRequestHeader('Content-Type','application/json'); x.send(JSON.stringify(arr));
+  }}catch(e){}
+}
+function hideChat(id){
+  HIDDEN[id]=1; persistHidden();
+  buildChatDropdown(el('chatSearch')?el('chatSearch').value:'');
+  // If the hidden chat was showing, jump to the first still-visible chat.
+  if(state.chatId===id && !state.isConnected && !state.isCompare){
+    var vis=visibleManifest();
+    if(vis.length) selectChat(vis[0].id);
+  }
+  // Keep compare selection consistent.
+  if(state.compareIds&&state.compareIds.length){
+    state.compareIds=state.compareIds.filter(function(x){return x!==id;});
+    if(state.isCompare) renderCompare();
+  }
+}
+function unhideChat(id){
+  delete HIDDEN[id]; persistHidden();
+  buildChatDropdown(el('chatSearch')?el('chatSearch').value:'');
+}
+function visibleManifest(){ return MANIFEST.filter(function(m){return platformVisible(m)&&!isHidden(m);}); }
 function buildPlatformFilter(){
   var present={}; MANIFEST.forEach(function(m){present[pfOf(m)]=1;});
   var plats=Object.keys(present).sort();
@@ -2429,21 +2827,57 @@ function buildChatDropdown(filter){
   you.appendChild(yn); you.appendChild(yd);
   you.onclick=function(){ selectConnected(); closeDD(); };
   list.appendChild(you);
+  // Pinned "⚖ Compare" entry — always on top, next to You — Connected.
+  var cmp=document.createElement('div');
+  cmp.className='dd-item pinned-compare'+(state.isCompare?' active':'');
+  var cn=document.createElement('span'); cn.textContent='⚖ Compare contacts';
+  var cd=document.createElement('span'); cd.className='n'; cd.textContent='2–5 dyads';
+  cmp.appendChild(cn); cmp.appendChild(cd);
+  cmp.onclick=function(){ selectCompare(); closeDD(); };
+  list.appendChild(cmp);
+  var shownRows=0;
   visibleManifest().forEach(function(m){
     if(q && m.name.toLowerCase().indexOf(q)<0) return;
+    shownRows++;
     var item=document.createElement('div');
     item.className='dd-item'+(m.id===state.chatId?' active':'');
     var name=document.createElement('span');
     name.textContent=pfBadge(pfOf(m))+' '+m.name;
     var n=document.createElement('span'); n.className='n';
     n.textContent=(m.is_group?('👥 '+(m.members||'')+' · '):'')+fmtNum(m.messages)+' msgs';
-    item.appendChild(name); item.appendChild(n);
+    var hide=document.createElement('span'); hide.className='dd-hide';
+    hide.textContent='✕'; hide.title='Hide this chat';
+    hide.onclick=function(e){ if(e&&e.stopPropagation) e.stopPropagation(); hideChat(m.id); };
+    item.appendChild(name); item.appendChild(n); item.appendChild(hide);
     item.onclick=function(){ selectChat(m.id); closeDD(); };
     list.appendChild(item);
   });
-  if(list.children.length<=1){ var e=document.createElement('div');
+  if(!shownRows){ var e=document.createElement('div');
     e.className='dd-item faint'; e.textContent='No matches'; list.appendChild(e); }
+  // Collapsed "Hidden (n)" section at the bottom, with per-chat unhide.
+  var hid=hiddenManifest();
+  if(hid.length){
+    var head=document.createElement('div'); head.className='dd-hidden-head';
+    head.textContent=(HIDDEN_OPEN?'▾ ':'▸ ')+'Hidden ('+hid.length+')';
+    head.onclick=function(){ HIDDEN_OPEN=!HIDDEN_OPEN; buildChatDropdown(el('chatSearch')?el('chatSearch').value:''); };
+    list.appendChild(head);
+    if(HIDDEN_OPEN){
+      var note=document.createElement('div'); note.className='dd-hidden-note';
+      note.textContent='Excluded from Connected & Insights on next re-analyze.';
+      list.appendChild(note);
+      hid.forEach(function(m){
+        var item=document.createElement('div'); item.className='dd-item faint';
+        var name=document.createElement('span'); name.textContent=pfBadge(pfOf(m))+' '+m.name;
+        var un=document.createElement('span'); un.className='dd-unhide';
+        un.textContent='↺ unhide'; un.title='Unhide this chat';
+        un.onclick=function(e){ if(e&&e.stopPropagation) e.stopPropagation(); unhideChat(m.id); };
+        item.appendChild(name); item.appendChild(un);
+        list.appendChild(item);
+      });
+    }
+  }
 }
+var HIDDEN_OPEN=false;
 function openDD(){ el('chatPanel').classList.add('open'); el('chatSearch').focus(); }
 function closeDD(){ el('chatPanel').classList.remove('open'); }
 function selectChat(id){
@@ -2504,7 +2938,7 @@ function onConnectedLoaded(v){
   if(!c||!c.daily){ connectedMissing(v); return; }
   disposeCharts();
   state.connectedVariant=v;
-  state.connected=c; state.isConnected=true;
+  state.connected=c; state.isConnected=true; state.isCompare=false;
   state.chat=null; state.isGroup=false; state.users=[c.owner||'You',null];
   var dates=Object.keys(c.daily).sort();
   if(dates.length){ state.fullStart=parseYMD(dates[0]); state.fullEnd=parseYMD(dates[dates.length-1]); }
@@ -2522,7 +2956,7 @@ function onChatLoaded(id){
   var chat=DATA[id];
   if(!chat){ return; }
   disposeCharts();
-  state.isConnected=false; state.connected=null;
+  state.isConnected=false; state.connected=null; state.isCompare=false;
   state.chat=chat;
   state.isGroup=!!chat.is_group;
   state.users=(chat.participants&&chat.participants.length>=2)?
@@ -2544,6 +2978,197 @@ function onChatLoaded(id){
   loadAndRenderFindings(id);
 }
 
+/* ============================================================ *
+ * COMPARE (⚖) mode — side-by-side of 2–5 dyads, every metric shown
+ * BOTH directions (you → them vs them → you), computed from the
+ * already-loaded per-chat daily tables over the CURRENT range.
+ * ============================================================ */
+var COMPARE_ID='__compare';
+/* Deterministic colour per contact name (stable across renders). */
+function cmpColor(name){ var h=0,s=String(name||'');
+  for(var i=0;i<s.length;i++){ h=(h*31+s.charCodeAt(i))>>>0; }
+  return GROUP_PAL[h%GROUP_PAL.length]; }
+
+/* Metric specs. `f(o,c,days)` returns [ownerValue, contactValue] from the
+   owner/contact range totals; `pct` renders the y-axis as a percentage. */
+var CMP_METRICS=[
+  {id:'cmpMsgs',title:'Messages / day',sub:'Average messages sent each direction per day (in range)',
+   f:function(o,c,days){ return [days?o.msgs/days:0, days?c.msgs/days:0]; },
+   fmt:function(v){return fmtNum(Math.round(v*10)/10);}},
+  {id:'cmpInit',title:'Initiation share',sub:'Who opens conversations (share of initiations)',pct:true,
+   f:function(o,c){ var t=o.initiations+c.initiations; return [t?o.initiations/t:0, t?c.initiations/t:0]; }},
+  {id:'cmpLat',title:'Reply latency (min)',sub:'Mean in-session reply latency each direction',
+   f:function(o,c){ return [o.resp_lat_n?o.resp_lat_sum_min/o.resp_lat_n:0,
+                            c.resp_lat_n?c.resp_lat_sum_min/c.resp_lat_n:0]; },
+   fmt:function(v){return fmtNum(Math.round(v*10)/10);}},
+  {id:'cmpDepth',title:'Words per turn',sub:'Depth of each turn, each direction',
+   f:function(o,c){ return [o.turns?o.words/o.turns:0, c.turns?c.words/c.turns:0]; },
+   fmt:function(v){return fmtNum(Math.round(v));}},
+  {id:'cmpQ',title:'Question rate',sub:'Questions per message, each direction',pct:true,
+   f:function(o,c){ return [o.msgs?o.questions/o.msgs:0, c.msgs?c.questions/c.msgs:0]; }},
+  {id:'cmpNight',title:'Night share',sub:'Share of messages 23:00–02:59, each direction',pct:true,
+   f:function(o,c){ return [o.msgs?o.night_msgs/o.msgs:0, c.msgs?c.night_msgs/c.msgs:0]; }},
+  {id:'cmpLaugh',title:'Laugh share',sub:'Messages with laughter per message, each direction',pct:true,
+   f:function(o,c){ return [o.msgs?o.laughs/o.msgs:0, c.msgs?c.laughs/c.msgs:0]; }},
+  {id:'cmpReact',title:'Left-on-react',sub:'Conversations ended with just a reaction, each direction',
+   f:function(o,c){ return [o.reacted_leave, c.reacted_leave]; },
+   fmt:function(v){return fmtNum(v);}}
+];
+
+/* Owner = the participant common to the selected dyads (most frequent). */
+function compareOwnerName(chats){
+  var counts={};
+  chats.forEach(function(c){ (c.participants||[]).forEach(function(p){ counts[p]=(counts[p]||0)+1; }); });
+  var best=null,bn=-1;
+  for(var p in counts){ if(counts[p]>bn){ bn=counts[p]; best=p; } }
+  return best;
+}
+/* Owner/contact totals for one chat over [sD,eD]. */
+function cmpChatTotals(chat, ownerName, sD, eD){
+  var contact=null;
+  (chat.participants||[]).forEach(function(p){ if(p!==ownerName) contact=p; });
+  if(contact==null) contact=(chat.participants&&chat.participants[1])||'them';
+  var o=blank(), c=blank(), d=chat.daily||{};
+  for(var ds in d){ var t=parseYMD(ds).getTime(); if(t<sD.getTime()||t>eD.getTime()) continue;
+    var cell=d[ds]; if(cell[ownerName]) addInto(o,cell[ownerName]); if(cell[contact]) addInto(c,cell[contact]); }
+  return {contact:contact, o:o, c:c};
+}
+function selectCompare(){
+  txt(el('chatBtnLabel'),'⚖ Compare');
+  disposeCharts();
+  state.isCompare=true; state.isConnected=false; state.connected=null;
+  state.chat=null; state.isGroup=false; state.chatId=COMPARE_ID;
+  if(!state.compareIds || state.compareIds.length<2){
+    var dyads=visibleManifest().filter(function(m){return !m.is_group;});
+    state.compareIds=dyads.slice(0,Math.min(3,dyads.length)).map(function(m){return m.id;});
+  }
+  state.preset='all';
+  renderCompareShell();
+  loadCompareData(function(){ buildPresets(); buildMonthPicker(); syncControls(); renderCompare(); });
+}
+function loadCompareData(cb){
+  var need=state.compareIds.filter(function(id){
+    return !DATA[id] && MANIFEST.some(function(x){return x.id===id;}); });
+  var remaining=need.length;
+  function finish(){ setCompareRange(); cb&&cb(); }
+  if(!remaining){ finish(); return; }
+  need.forEach(function(id){
+    var m=MANIFEST.filter(function(x){return x.id===id;})[0];
+    var s=document.createElement('script'); s.src=m.file;
+    s.onload=function(){ if(--remaining<=0) finish(); };
+    s.onerror=function(){ if(--remaining<=0) finish(); };
+    document.body.appendChild(s);
+  });
+}
+function setCompareRange(){
+  var lo=null,hi=null;
+  state.compareIds.forEach(function(id){ var c=DATA[id]; if(!c||!c.daily) return;
+    var ks=Object.keys(c.daily).sort(); if(!ks.length) return;
+    var a=parseYMD(ks[0]), b=parseYMD(ks[ks.length-1]);
+    if(!lo||a.getTime()<lo.getTime()) lo=a;
+    if(!hi||b.getTime()>hi.getTime()) hi=b;
+  });
+  if(!lo){ var t=new Date(); lo=t; hi=t; }
+  state.fullStart=lo; state.fullEnd=hi;
+  if(!state.start||state.preset==='all'){ state.start=new Date(lo.getTime()); state.end=new Date(hi.getTime()); }
+  state.start=minD(maxD(state.start,state.fullStart),state.fullEnd);
+  state.end=maxD(minD(state.end,state.fullEnd),state.fullStart);
+}
+function toggleCompare(id){
+  var i=state.compareIds.indexOf(id);
+  if(i>=0){ state.compareIds.splice(i,1); }
+  else { if(state.compareIds.length>=5) return; state.compareIds.push(id); }
+  renderComparePicker();
+  loadCompareData(function(){ syncControls(); renderCompare(); });
+}
+function renderCompareShell(){
+  var chartsHtml='';
+  CMP_METRICS.forEach(function(mt){
+    chartsHtml+=card(mt.title, mt.sub, '<div class="chart" id="'+mt.id+'"></div>');
+  });
+  el('app').innerHTML=
+    section('⚖ Compare contacts',
+      '<div class="sub" style="margin-bottom:8px">Pick 2–5 direct chats. Every metric is shown BOTH '
+      +'directions — <span class="dotA"></span> you → them and <span class="dotB"></span> them → you — '
+      +'over the selected time range. Groups are excluded; newly selected chats load on demand.</div>'
+      +'<div class="cmp-pick" id="cmpPick"></div>')
+    + section('Side-by-side metrics','<div class="grid cols-2">'+chartsHtml+'</div>')
+    + section('Findings per contact','<div id="cmpFindings"><div class="findings-empty">…</div></div>');
+  renderComparePicker();
+}
+function renderComparePicker(){
+  var box=el('cmpPick'); if(!box) return;
+  box.innerHTML='';
+  var dyads=visibleManifest().filter(function(m){return !m.is_group;});
+  dyads.forEach(function(m){
+    var on=state.compareIds.indexOf(m.id)>=0;
+    var opt=document.createElement('span'); opt.className='cmp-opt'+(on?' on':'');
+    var sw=document.createElement('span'); sw.className='swatch'; sw.style.background=cmpColor(m.name);
+    var lab=document.createElement('span'); lab.textContent=(on?'☑ ':'☐ ')+pfBadge(pfOf(m))+' '+m.name;
+    opt.appendChild(sw); opt.appendChild(lab);
+    opt.onclick=function(){ toggleCompare(m.id); };
+    box.appendChild(opt);
+  });
+}
+function renderCompare(){
+  if(!state.isCompare) return;
+  renderComparePicker();
+  var ids=state.compareIds.filter(function(id){return DATA[id]&&DATA[id].daily;});
+  if(ids.length<2){
+    CMP_METRICS.forEach(function(mt){ var n=el(mt.id);
+      if(n){ var c=charts[mt.id]; if(c){try{c.clear();}catch(e){}} n.innerHTML='<div class="placeholder">Pick at least 2 contacts</div>'; charts[mt.id]=null; } });
+    var fb0=el('cmpFindings'); if(fb0) fb0.innerHTML='<div class="findings-empty">Pick at least 2 contacts to compare.</div>';
+    return;
+  }
+  var chatsSel=ids.map(function(id){return DATA[id];});
+  var owner=compareOwnerName(chatsSel)||'You';
+  var days=dayDiff(state.start,state.end)+1;
+  var rows=ids.map(function(id){
+    var t=cmpChatTotals(DATA[id],owner,state.start,state.end);
+    var m=MANIFEST.filter(function(x){return x.id===id;})[0]||{};
+    return {id:id,name:m.name||t.contact,badge:pfBadge(pfOf(m)),o:t.o,c:t.c}; });
+  var cats=rows.map(function(r){return r.badge+' '+r.name;});
+  CMP_METRICS.forEach(function(mt){
+    ensureCanvas(mt.id);
+    var oData=[], cData=[];
+    rows.forEach(function(r){ var pair=mt.f(r.o,r.c,days);
+      oData.push(+(pair[0]||0));
+      cData.push({value:+(pair[1]||0), itemStyle:{color:cmpColor(r.name)}}); });
+    var fmt = mt.fmt || (mt.pct?function(v){return fmtPct(v,1);}:function(v){return fmtNum(v);});
+    setChart(mt.id,{grid:baseGrid(),legend:legend(['You →','→ You']),
+      tooltip:{trigger:'axis',backgroundColor:PANEL,borderColor:GRID,textStyle:{color:TEXT},
+        valueFormatter:function(v){return fmt(v);}},
+      xAxis:{type:'category',data:cats,axisLine:{lineStyle:{color:GRID}},
+        axisLabel:{color:MUTED,interval:0,rotate:cats.length>3?18:0}},
+      yAxis: mt.pct?valAxis({axisLabel:{color:MUTED,formatter:function(v){return (v*100).toFixed(0)+'%';}}}):valAxis({}),
+      series:[
+        {name:'You →',type:'bar',data:oData,itemStyle:{color:COLORS.a},barMaxWidth:26,
+          label:{show:cats.length<=4,position:'top',color:MUTED,fontSize:9,formatter:function(o){return fmt(o.value);}}},
+        {name:'→ You',type:'bar',data:cData,barMaxWidth:26,
+          label:{show:cats.length<=4,position:'top',color:MUTED,fontSize:9,formatter:function(o){return fmt(o.value);}}}
+      ]});
+  });
+  renderCompareFindings(rows);
+}
+function renderCompareFindings(rows){
+  var box=el('cmpFindings'); if(!box) return;
+  ensureInsights(function(){
+    var ins=window.INSIGHTS||{}, h='';
+    rows.forEach(function(r){
+      var list=ins[r.id]||[];
+      h+='<div class="cmp-dyad-row"><div class="cmp-dyad-name">'
+        +'<span class="swatch" style="display:inline-block;width:9px;height:9px;border-radius:2px;background:'
+        +cmpColor(r.name)+'"></span>'+esc(r.badge+' '+r.name)+'</div>';
+      if(list.length){ h+='<div class="cmp-chips">';
+        list.forEach(function(f){ h+='<span class="cmp-chip" title="'+esc(f.sentence||'')+'">'+esc(f.id)+'</span>'; });
+        h+='</div>'; }
+      else { h+='<div class="findings-empty">No findings.</div>'; }
+      h+='</div>';
+    });
+    box.innerHTML=h;
+  });
+}
+
 /* ---------- init ---------- */
 function init(){
   if(!MANIFEST.length){ el('app').innerHTML='<div class="placeholder" style="height:240px">No chats found. Run build_dashboard.py first.</div>'; return; }
@@ -2552,13 +3177,19 @@ function init(){
   el('chatSearch').oninput=function(){ buildChatDropdown(this.value); };
   document.addEventListener('click',function(e){
     if(!el('chatDD').contains(e.target)) closeDD(); });
-  el('gran').onchange=function(){ state.gran=this.value; if(state.chat||state.isConnected) rerender(); };
-  el('monthSel').onchange=function(){ if(state.chat||state.isConnected) applyMonth(this.value); };
+  el('gran').onchange=function(){ state.gran=this.value; if(state.chat||state.isConnected||state.isCompare) rerender(); };
+  el('monthSel').onchange=function(){ if(state.chat||state.isConnected||state.isCompare) applyMonth(this.value); };
   el('applyRange').onclick=applyCustomRange;
   el('dFrom').onchange=function(){}; el('dTo').onchange=function(){};
+  // Load hidden-chat state (localStorage + launcher /hidden) before first paint.
+  loadHidden(function(){ buildChatDropdown(el('chatSearch')?el('chatSearch').value:'');
+    // If the currently-shown chat just got hidden by a synced list, jump away.
+    if(state.chatId&&HIDDEN[state.chatId]&&!state.isConnected&&!state.isCompare){
+      var v=visibleManifest(); if(v.length) selectChat(v[0].id); } });
   buildPlatformFilter();
   buildChatDropdown('');
-  selectChat(MANIFEST[0].id);
+  var firstVis=visibleManifest();
+  selectChat((firstVis[0]||MANIFEST[0]).id);
 }
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init);
 else init();

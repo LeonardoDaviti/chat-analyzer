@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -840,6 +841,349 @@ def test_build_insights_connected_only(tmp_path):
     out = json.loads((data / 'insights.json').read_text(encoding='utf-8'))
     assert 'connected' in out
     assert 'all' in out['connected']
+
+
+# =========================================================================== #
+# Wave 2 rule tests — 14 missing rules (9 chat + 5 connected)
+# =========================================================================== #
+
+# ---- 28. unanswered-bids (chat) ----
+def _unanswered_daily():
+    """High-volume symmetric chat with big answer-rate gap."""
+    d = {}
+    for i in range(12):
+        day = f'2024-{i+1:02d}-15'
+        d[day] = {
+            PARTNER: cell(msgs=80, questions=8, questions_answered=7,
+                          words=400, turns=16, initiations=3),
+            OWNER: cell(msgs=80, questions=8, questions_answered=2,
+                        words=400, turns=16, initiations=3),
+        }
+    return d
+
+def test_unanswered_bids_triggers():
+    """One person's questions get answered far less than the other's."""
+    out = _run(chat_payload(_unanswered_daily(),
+                            lifetime={'response_times': {
+                                'my_median_response_minutes': 5.0,
+                                'partner_median_response_minutes': 2.0}}))
+    assert 'unanswered-bids' in ids(out)
+
+
+def test_unanswered_bids_gate_balanced_answers():
+    """When answer rates are similar, unanswered-bids stays silent."""
+    d = _unanswered_daily()
+    # Make both answer rates similar
+    for day in d:
+        d[day][OWNER]['questions_answered'] = 6  # 75% vs 87%
+    out = _run(chat_payload(d))
+    assert 'unanswered-bids' not in ids(out)
+
+
+# ---- 29. shared-laughter (chat) ----
+def _laughter_payload(co_share=0.7, total=50):
+    extras = {'laughter': {'laugh_sessions': total,
+                           'co_laugh_sessions': int(total * co_share),
+                           'solo_laugh_sessions': {PARTNER: 3, OWNER: 2}}}
+    return chat_payload(baseline_daily(), extras=extras)
+
+def test_shared_laughter_triggers():
+    """Most laugh-sessions are shared → fun finding."""
+    out = _run(_laughter_payload(co_share=0.75, total=50))
+    assert 'shared-laughter' in ids(out)
+
+
+def test_shared_laughter_gate_low_share():
+    """When <50% laughs are shared, stays silent."""
+    out = _run(_laughter_payload(co_share=0.4, total=50))
+    assert 'shared-laughter' not in ids(out)
+
+
+# ---- 30. laughing-alone (chat) ----
+def test_laughing_alone_triggers():
+    """One person laughs alone most of the time."""
+    extras = {'laughter': {
+        'laugh_sessions': 50,
+        'co_laugh_sessions': 30,
+        'solo_laugh_sessions': {PARTNER: 20, OWNER: 3}}}
+    out = _run(chat_payload(baseline_daily(), extras=extras))
+    assert 'laughing-alone' in ids(out)
+
+
+def test_laughing_alone_gate_balanced_solo():
+    """When solo laughs are split, stays silent."""
+    extras = {'laughter': {
+        'laugh_sessions': 50,
+        'co_laugh_sessions': 30,
+        'solo_laugh_sessions': {PARTNER: 10, OWNER: 10}}}
+    out = _run(chat_payload(baseline_daily(), extras=extras))
+    assert 'laughing-alone' not in ids(out)
+
+
+# ---- 31. feast-and-famine (chat) ----
+def test_feast_and_famine_triggers():
+    """High weekly-volume CV → bursts and silences."""
+    daily = {}
+    # 20 weeks: quiet baseline punctuated by a burst every 4th week. Simple
+    # 2-level alternation only reaches CV ~0.95; the rule needs CV >= 1.2, so the
+    # data must be genuinely spiky (bursty weeks amid silences) — which is
+    # exactly the phenomenon the rule names. (CV ~1.66 here.)
+    for week in range(20):
+        base_day = week * 7
+        for d_idx in range(7):
+            day_num = base_day + d_idx
+            day_str = (date(2024, 1, 1) + timedelta(days=day_num)).isoformat()
+            vol = 2000 if week % 4 == 0 else 20
+            daily[day_str] = {
+                PARTNER: cell(msgs=vol // 2, words=vol * 5, turns=vol // 2,
+                              initiations=2),
+                OWNER: cell(msgs=vol // 2, words=vol * 5, turns=vol // 2,
+                            initiations=2),
+            }
+    out = _run(chat_payload(daily))
+    assert 'feast-and-famine' in ids(out)
+
+
+def test_feast_and_famine_gate_low_cv():
+    """Steady volume → stays silent."""
+    daily = baseline_daily(n_months=12, msgs_each=60)
+    out = _run(chat_payload(daily))
+    assert 'feast-and-famine' not in ids(out)
+
+
+# ---- 32. steady-drumbeat (chat) ----
+def test_steady_drumbeat_triggers():
+    """Very low weekly CV over many weeks → steady rhythm."""
+    daily = {}
+    # Build 30 weeks of nearly constant volume
+    for week in range(30):
+        base_day = week * 7
+        for d_idx in range(7):
+            day_num = base_day + d_idx
+            day_str = (date(2024, 1, 1) + timedelta(days=day_num)).isoformat()
+            daily[day_str] = {
+                PARTNER: cell(msgs=30, words=150, turns=10, initiations=2),
+                OWNER: cell(msgs=30, words=150, turns=10, initiations=2),
+            }
+    out = _run(chat_payload(daily))
+    assert 'steady-drumbeat' in ids(out)
+
+
+def test_steady_drumbeat_gate_high_cv():
+    """High CV → stays silent (feast-and-famine fires instead)."""
+    daily = {}
+    for week in range(20):
+        base_day = week * 7
+        for d_idx in range(7):
+            day_num = base_day + d_idx
+            day_str = (date(2024, 1, 1) + timedelta(days=day_num)).isoformat()
+            vol = 200 if week % 2 == 0 else 5
+            daily[day_str] = {
+                PARTNER: cell(msgs=vol // 2, words=vol * 5, turns=vol // 2,
+                              initiations=2),
+                OWNER: cell(msgs=vol // 2, words=vol * 5, turns=vol // 2,
+                            initiations=2),
+            }
+    out = _run(chat_payload(daily))
+    assert 'steady-drumbeat' not in ids(out)
+
+
+# ---- 33. different-clocks — REMOVED (wave-2, docs/WAVE2_REVIEW.md Part E.2) ----
+# The rule was deleted: circadian_overlap (even as the overlap coefficient) is
+# 0.79-0.99 corpus-wide, so no dyad clears a defensible "different clocks" bar.
+# The metric survives in extras.circadian_overlap for the future circadian card;
+# there is no rule to test.
+
+
+def test_different_clocks_rule_is_gone():
+    """The removed rule must not be registered nor firing on any overlap."""
+    from src import insights_engine as ie
+    assert 'different-clocks' not in ie.CHAT_RULES
+    extras = {'circadian_overlap': 0.1}   # would have fired under the old gate
+    out = _run(chat_payload(baseline_daily(n_months=12, msgs_each=80),
+                            extras=extras))
+    assert 'different-clocks' not in ids(out)
+
+
+# ---- 34. length-mirroring (chat) ----
+def test_length_mirroring_triggers():
+    """Turn-length elasticity r>=0.35 → finding."""
+    extras = {'turn_elasticity': {
+        PARTNER: {'r': 0.5, 'n': 500},
+        OWNER: {'r': 0.2, 'n': 300}}}
+    daily = baseline_daily(n_months=12, msgs_each=80)
+    out = _run(chat_payload(daily, extras=extras))
+    assert 'length-mirroring' in ids(out)
+
+
+def test_length_mirroring_gate_low_r():
+    """Low r (<0.35) → stays silent."""
+    extras = {'turn_elasticity': {
+        PARTNER: {'r': 0.25, 'n': 500},
+        OWNER: {'r': 0.15, 'n': 300}}}
+    daily = baseline_daily(n_months=12, msgs_each=80)
+    out = _run(chat_payload(daily, extras=extras))
+    assert 'length-mirroring' not in ids(out)
+
+
+# ---- 35. openings-that-land (chat) ----
+def test_openings_that_land_triggers():
+    """One person's openings go much deeper."""
+    extras = {'opening_quality': {
+        PARTNER: {'median_msgs': 20, 'n': 40},
+        OWNER: {'median_msgs': 8, 'n': 35}}}
+    daily = baseline_daily(n_months=12, msgs_each=80)
+    out = _run(chat_payload(daily, extras=extras))
+    assert 'openings-that-land' in ids(out)
+
+
+def test_openings_that_land_gate_similar():
+    """Similar opening depth → stays silent."""
+    extras = {'opening_quality': {
+        PARTNER: {'median_msgs': 12, 'n': 30},
+        OWNER: {'median_msgs': 10, 'n': 30}}}
+    daily = baseline_daily(n_months=12, msgs_each=80)
+    out = _run(chat_payload(daily, extras=extras))
+    assert 'openings-that-land' not in ids(out)
+
+
+# ---- 36. repair (chat) — quick-repair ----
+def test_repair_quick_triggers():
+    """Fast median repair → elastic ties."""
+    extras = {'rupture_repair': {
+        'n_ruptures': 5,
+        'median_repair_weeks': 1.0}}
+    out = _run(chat_payload(baseline_daily(n_months=12, msgs_each=80),
+                            extras=extras))
+    ids_out = ids(out)
+    assert 'quick-repair' in ids_out or 'slow-repair' in ids_out
+    # Check it's quick-repair (low median)
+    for f in out:
+        if f['id'] in ('quick-repair', 'slow-repair'):
+            assert f['id'] == 'quick-repair'
+            break
+
+
+def test_repair_slow_triggers():
+    """Slow median repair → brittle ties."""
+    extras = {'rupture_repair': {
+        'n_ruptures': 5,
+        'median_repair_weeks': 8.0}}
+    out = _run(chat_payload(baseline_daily(n_months=12, msgs_each=80),
+                            extras=extras))
+    for f in out:
+        if f['id'] in ('quick-repair', 'slow-repair'):
+            assert f['id'] == 'slow-repair'
+            break
+    else:
+        pytest.fail('Expected repair finding but got none')
+
+
+def test_repair_gate_no_ruptures():
+    """No ruptures → stays silent."""
+    extras = {'rupture_repair': {
+        'n_ruptures': 0,
+        'median_repair_weeks': None}}
+    out = _run(chat_payload(baseline_daily(n_months=12, msgs_each=80),
+                            extras=extras))
+    ids_out = ids(out)
+    assert 'quick-repair' not in ids_out
+    assert 'slow-repair' not in ids_out
+
+
+# ---- 37. dormancy-resilience (connected) — elastic ----
+def test_dormancy_resilience_elastic_triggers():
+    """High recover share → elastic ties."""
+    p = conn_base(dormancy={'revivals': 10, 'recover_share': 0.80})
+    out = run_connected(p)
+    ids_out = conn_ids(out)
+    assert 'elastic-ties' in ids_out
+
+
+def test_dormancy_resilience_gate_low_share():
+    """Low recover share → stays silent."""
+    p = conn_base(dormancy={'revivals': 10, 'recover_share': 0.50})
+    out = run_connected(p)
+    ids_out = conn_ids(out)
+    assert 'elastic-ties' not in ids_out
+    assert 'brittle-ties' not in ids_out
+
+
+# ---- 38. drifting-away (connected) ----
+def test_drifting_away_triggers():
+    """Top-volume contact you now answer much slower."""
+    p = conn_base(attention_debt=[
+        {'name': 'Drifting', 'volume_rank': 5,
+         'earlier_median_min': 2.0, 'recent_median_min': 10.0, 'ratio': 5.0}])
+    out = run_connected(p)
+    assert 'drifting-away' in conn_ids(out)
+
+
+def test_drifting_away_gate_low_ratio():
+    """Small latency increase → stays silent."""
+    p = conn_base(attention_debt=[
+        {'name': 'Slow', 'volume_rank': 5,
+         'earlier_median_min': 4.0, 'recent_median_min': 5.0, 'ratio': 1.25}])
+    out = run_connected(p)
+    assert 'drifting-away' not in conn_ids(out)
+
+
+# ---- 39. novelty (connected) — explorer ----
+def test_novelty_explorer_triggers():
+    """High trailing novelty → explorer."""
+    p = conn_base(novelty={'trailing_6mo': 0.35, 'n_contacts': 20})
+    out = run_connected(p)
+    ids_out = conn_ids(out)
+    assert 'explorer-vs-consolidator' in ids_out
+    for f in out:
+        if f['id'] == 'explorer-vs-consolidator':
+            assert f.get('sentence') and 'explorer' in f['sentence'].lower()
+            break
+    else:
+        pytest.fail('Expected explorer-vs-consolidator finding')
+
+
+def test_novelty_consolidator_triggers():
+    """Very low trailing novelty → consolidator."""
+    p = conn_base(novelty={'trailing_6mo': 0.01, 'n_contacts': 20})
+    out = run_connected(p)
+    for f in out:
+        if f['id'] == 'explorer-vs-consolidator':
+            assert f.get('sentence') and 'consolidator' in f['sentence'].lower()
+            break
+    else:
+        pytest.fail('Expected explorer-vs-consolidator finding')
+
+
+def test_novelty_gate_low_contacts():
+    """Too few contacts → stays silent."""
+    p = conn_base(novelty={'trailing_6mo': 0.40, 'n_contacts': 5})
+    out = run_connected(p)
+    ids_out = conn_ids(out)
+    assert 'explorer-vs-consolidator' not in ids_out
+
+
+# ---- 40/41. platform-focus & platform-persona (connected) ----
+# NOTE: ``test_platform_focus_triggers``, ``test_platform_focus_gate_similar``
+# and ``test_platform_persona_triggers`` were previously RE-DEFINED here,
+# silently shadowing the earlier (working) definitions above that use
+# ``_platform_variant``. The duplicates were removed (docs/WAVE2_REVIEW.md Part D
+# item 6). Only the persona GATE test was unique to this block; it is kept below,
+# now built with FLAT owner daily cells — the real connected ``daily`` shape that
+# ``_owner_style`` sums (item 5). Real dates avoid the day-collision bug (item 4).
+def test_platform_persona_gate_similar():
+    """Similar writing style across platforms → stays silent."""
+    ig_daily = {}
+    tg_daily = {}
+    for i in range(200):
+        day_str = (date(2024, 1, 1) + timedelta(days=i)).isoformat()
+        # FLAT owner cells (matches connected_*.json), not chat-style {'B': ...}.
+        ig_daily[day_str] = cell(msgs=50, words=250, emoji=15)   # emoji_rate 0.06
+        tg_daily[day_str] = cell(msgs=50, words=250, emoji=14)   # emoji_rate 0.056
+    ig = conn_base(totals={'messages_sent': 10000}, daily=ig_daily)
+    tg = conn_base(totals={'messages_sent': 10000}, daily=tg_daily)
+    out = run_connected(conn_base(), ig=ig, tg=tg)
+    assert 'platform-persona' not in conn_ids(out)
 
 
 if __name__ == '__main__':

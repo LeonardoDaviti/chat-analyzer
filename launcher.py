@@ -36,11 +36,22 @@ import sys
 import tempfile
 import threading
 
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 PORT = 8347
 HOST = "127.0.0.1"
+
+# Single source of truth for the app version (also referenced by the spec/CI tag).
+APP_VERSION = "1.1.0"
+
+# The ONLY network endpoint the entire product ever touches — a metadata-only,
+# fail-silent GitHub release check (M1.5). No content, no telemetry.
+RELEASES_API = (
+    "https://api.github.com/repos/LeonardoDaviti/chat-analyzer/releases/latest"
+)
+RELEASES_PAGE = "https://github.com/LeonardoDaviti/chat-analyzer/releases"
 
 
 # --------------------------------------------------------------------------- #
@@ -134,6 +145,76 @@ def _snapshot_progress() -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Update-awareness (M1.5) — the ONLY network call in the whole product.
+# Metadata only (a version tag), 3s timeout, ANY failure = silently no banner.
+# --------------------------------------------------------------------------- #
+_version_lock = threading.Lock()
+_VERSION_INFO = {"current": APP_VERSION, "latest": None, "update_available": False}
+
+
+def _version_tuple(tag) -> tuple:
+    """Parse a ``v1.2.3``-style tag into a comparable int tuple (best effort)."""
+    parts = []
+    for chunk in str(tag or "").strip().lstrip("vV").split("."):
+        digits = "".join(ch for ch in chunk if ch.isdigit())
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts)
+
+
+def _compare_versions(current: str, latest: str) -> bool:
+    """True iff ``latest`` is a strictly newer version than ``current``."""
+    lt = _version_tuple(latest)
+    if not lt:
+        return False
+    return lt > _version_tuple(current)
+
+
+def check_for_update(url: str = RELEASES_API, timeout: float = 3.0) -> None:
+    """Query GitHub's latest release once and record whether we're behind.
+
+    Stdlib urllib only. ANY failure (offline, rate-limit, bad JSON, missing tag)
+    leaves ``_VERSION_INFO`` untouched so no banner is ever shown — the check is
+    strictly best-effort and never raises.
+    """
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": f"ChatAnalyzer/{APP_VERSION}",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        latest = data.get("tag_name") or data.get("name")
+        if not latest:
+            return
+        available = _compare_versions(APP_VERSION, latest)
+        with _version_lock:
+            _VERSION_INFO.update(
+                current=APP_VERSION,
+                latest=str(latest).strip().lstrip("vV"),
+                update_available=available,
+            )
+    except Exception:
+        return  # offline / rate-limited / unparseable → silent, no banner
+
+
+def _snapshot_version() -> dict:
+    with _version_lock:
+        return dict(_VERSION_INFO)
+
+
+def _start_update_check() -> None:
+    """Kick the version check off in a daemon thread so startup never blocks."""
+    threading.Thread(target=check_for_update, daemon=True).start()
+
+
+# --------------------------------------------------------------------------- #
 # Pipeline worker
 # --------------------------------------------------------------------------- #
 def _sanitize_upload_name(name: str) -> str:
@@ -172,18 +253,25 @@ def _ingest(source_path: Path, display_name: str | None = None) -> None:
     raise ValueError(f"Not a zip or a folder: {source_path}")
 
 
-def run_pipeline(source_path: Path, cleanup: bool = False,
-                 display_name: str | None = None) -> None:
-    """Full pipeline in a worker thread: import → analyze → dashboard → connected.
+def run_pipeline(source_path: Path | None, cleanup: bool = False,
+                 display_name: str | None = None, import_step: bool = True) -> None:
+    """Full pipeline in a worker thread: [import →] analyze → dashboard → connected.
 
     ``display_name`` is the sanitized original upload filename (or None for
-    path/folder imports); it names the extracted chat folder.
+    path/folder imports); it names the extracted chat folder. When
+    ``import_step`` is False (the Re-analyze action) the ingest step is skipped
+    entirely and the run goes straight to analysis over the existing ``Chats/``.
     """
     global _running
     try:
-        _set_progress(stage="importing", detail=display_name or source_path.name,
-                      i=0, n=0, done=False, error=None)
-        _ingest(source_path, display_name=display_name)
+        if import_step:
+            _set_progress(stage="importing",
+                          detail=display_name or (source_path.name if source_path else ""),
+                          i=0, n=0, done=False, error=None)
+            _ingest(source_path, display_name=display_name)
+        else:
+            _set_progress(stage="analyzing", detail="", i=0, n=0,
+                          done=False, error=None)
 
         import main
         _set_progress(stage="analyzing", detail="")
@@ -258,6 +346,45 @@ def _start_run(source_path: Path, cleanup: bool,
     return True
 
 
+def _start_reanalyze() -> bool:
+    """Re-run analysis over the existing ``Chats/`` with no import step (M1.3)."""
+    global _running
+    with _state_lock:
+        if _running:
+            return False
+        _running = True
+    t = threading.Thread(
+        target=run_pipeline,
+        kwargs={"source_path": None, "import_step": False},
+        daemon=True,
+    )
+    t.start()
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# Start fresh (M1.6) — archive current data, never delete
+# --------------------------------------------------------------------------- #
+def start_fresh() -> tuple[Path, list[str]]:
+    """Move ``Chats``/``Outputs``/``Dashboard`` into a timestamped backup folder.
+
+    Creates a sibling ``ChatAnalyzer.backup-YYYYMMDD-HHMMSS`` directory under
+    WORK_ROOT and *moves* (never deletes) whichever of the three data dirs exist
+    into it, returning ``(backup_dir, moved_names)``. The setup page then reloads
+    to its empty state because the manifest is gone.
+    """
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = WORK_ROOT / f"ChatAnalyzer.backup-{stamp}"
+    backup.mkdir(parents=True, exist_ok=True)
+    moved: list[str] = []
+    for name in ("Chats", "Outputs", "Dashboard"):
+        src = WORK_ROOT / name
+        if src.exists():
+            shutil.move(str(src), str(backup / name))
+            moved.append(name)
+    return backup, moved
+
+
 # --------------------------------------------------------------------------- #
 # Multipart streaming (exports can be 1GB+ — never buffer the whole body)
 # --------------------------------------------------------------------------- #
@@ -322,6 +449,117 @@ def stream_multipart_file(rfile, length: int, boundary: bytes, dest) -> str:
         data += chunk
 
 
+def _safe_tree_join(root: Path, rel: str) -> Path | None:
+    """Join a browser-supplied relative path under ``root``, traversal-safe.
+
+    Strips drive letters / leading slashes and rejects any ``..`` component so a
+    folder upload can never escape the reconstruction dir (analogous to the
+    zip-slip guard in ``main.import_zip``). Returns None for an unusable path.
+    """
+    rel = (rel or "").replace("\\", "/").lstrip("/")
+    parts = [p for p in rel.split("/") if p not in ("", ".")]
+    if not parts or any(p == ".." for p in parts):
+        return None
+    root_res = root.resolve()
+    target = (root / Path(*parts)).resolve()
+    if target != root_res and root_res not in target.parents:
+        return None
+    return target
+
+
+def stream_multipart_folder(rfile, length: int, boundary: bytes,
+                            dest_root: Path) -> int:
+    """Stream every file part of a multipart body into a tree under ``dest_root``.
+
+    Each part's ``filename`` carries the file's path relative to the dropped
+    folder (the client sends ``webkitRelativePath``); the tree is reconstructed
+    on disk so the existing directory-import path in ``_ingest`` can pick it up.
+    Bodies are streamed in bounded chunks so a multi-hundred-MB folder never
+    lands in memory. Returns the number of files written.
+    """
+    delim = b"--" + boundary
+    remaining = length
+
+    def _read(n: int = 1 << 16) -> bytes:
+        nonlocal remaining
+        if remaining <= 0:
+            return b""
+        chunk = rfile.read(min(n, remaining))
+        remaining -= len(chunk)
+        return chunk
+
+    buf = b""
+    # Skip the preamble up to and including the first boundary.
+    while delim not in buf:
+        chunk = _read()
+        if not chunk:
+            return 0
+        buf += chunk
+    buf = buf.split(delim, 1)[1]
+
+    written = 0
+    needle = b"\r\n" + delim
+    while True:
+        while len(buf) < 2:
+            chunk = _read()
+            if not chunk:
+                return written
+            buf += chunk
+        if buf[:2] == b"--":            # closing boundary → done
+            return written
+        if buf[:2] == b"\r\n":          # CRLF before this part's headers
+            buf = buf[2:]
+
+        while b"\r\n\r\n" not in buf:
+            chunk = _read()
+            if not chunk:
+                return written
+            buf += chunk
+        header_block, _, buf = buf.partition(b"\r\n\r\n")
+
+        filename = ""
+        for line in header_block.split(b"\r\n"):
+            low = line.lower()
+            if low.startswith(b"content-disposition") and b"filename=" in low:
+                try:
+                    filename = line.split(b"filename=", 1)[1].split(b";")[0]
+                    filename = filename.strip().strip(b'"').decode("utf-8", "replace")
+                except Exception:
+                    filename = ""
+
+        dest = _safe_tree_join(dest_root, filename) if filename else None
+        fh = None
+        if dest is not None:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            fh = open(dest, "wb")
+        try:
+            while True:
+                idx = buf.find(needle)
+                if idx != -1:
+                    if fh:
+                        fh.write(buf[:idx])
+                    buf = buf[idx + len(needle):]   # advance past CRLF + boundary
+                    break
+                keep = len(needle)
+                if len(buf) > keep:
+                    if fh:
+                        fh.write(buf[:-keep])
+                    buf = buf[-keep:]
+                chunk = _read()
+                if not chunk:
+                    if fh:
+                        fh.write(buf)
+                    buf = b""
+                    break
+                buf += chunk
+        finally:
+            if fh:
+                fh.close()
+        if dest is not None:
+            written += 1
+    return written
+
+
 # --------------------------------------------------------------------------- #
 # HTML
 # --------------------------------------------------------------------------- #
@@ -353,43 +591,110 @@ button:disabled{opacity:.5;cursor:default}
 #bar>div{height:100%;width:0;background:var(--a);transition:width .3s}
 #status{margin-top:10px;font-size:13px;min-height:18px}
 .err{color:var(--bad)}
+button.ghost{background:transparent;color:var(--muted);border:1px solid var(--border)}
+.row{display:flex;gap:10px;flex-wrap:wrap}
+.linklike{color:var(--a);cursor:pointer;text-decoration:underline;font-size:13px}
+#updateBanner{display:none;margin:0 0 16px;padding:10px 14px;border-radius:8px;
+  background:rgba(77,182,172,.12);border:1px solid var(--a);color:var(--text);
+  font-size:13px}
+#updateBanner a{color:var(--a);font-weight:600}
+#updateBanner .x{float:right;cursor:pointer;color:var(--muted);
+  margin-left:12px;font-weight:700}
 </style></head>
 <body><div class="card">
+<div id="updateBanner"><span class="x" onclick="this.parentNode.style.display='none'">×</span>
+Update available — <a id="updateLink" href="__RELEASES_PAGE__" target="_blank" rel="noopener">download here</a></div>
 <h1>Chat Analyzer</h1>
 <div class="muted">Everything runs on your computer. Nothing is uploaded anywhere.</div>
 <div class="muted" style="margin-top:8px">Your dashboard and imported chats are stored in:<br>
 <code style="color:#4DB6AC;word-break:break-all">__WORK_ROOT__</code></div>
 
-<div id="drop">Drop your Instagram or Telegram export <b>.zip</b> here<br>
-<span class="muted">or click to choose a file, paste a path, or drop a folder</span>
-<input id="file" type="file" accept=".zip" hidden></div>
+<div id="drop">Drop your Instagram or Telegram export <b>.zip</b> or a <b>folder</b> here<br>
+<span class="muted">or click to choose a file, <span id="folderPick" class="linklike">choose a folder</span>, or paste a path below</span>
+<input id="file" type="file" accept=".zip" hidden>
+<input id="folder" type="file" webkitdirectory directory multiple hidden></div>
 
 <div class="sep">Or paste a path to a zip / folder on this computer</div>
 <input id="path" type="text" placeholder="/home/you/Downloads/export.zip or /path/to/chat-folder">
 <button id="pathbtn">Analyze this path</button>
+
+<div class="sep">Already imported chats? Manage your data</div>
+<div class="row">
+<button id="reanalyzeBtn">↻ Re-analyze everything</button>
+<button id="freshBtn" class="ghost">Start fresh (archive current data)</button>
+</div>
 
 <div id="bar"><div></div></div>
 <div id="status"></div>
 </div>
 <script>
 const drop=document.getElementById('drop'),file=document.getElementById('file'),
+  folder=document.getElementById('folder'),folderPick=document.getElementById('folderPick'),
   bar=document.getElementById('bar'),barFill=bar.firstElementChild,
   status=document.getElementById('status'),pathBtn=document.getElementById('pathbtn'),
-  pathInput=document.getElementById('path');
+  pathInput=document.getElementById('path'),reBtn=document.getElementById('reanalyzeBtn'),
+  freshBtn=document.getElementById('freshBtn');
 let polling=false;
 function busy(){status.classList.remove('err');bar.style.display='block';}
 function fail(m){status.classList.add('err');status.textContent=m;}
-drop.onclick=()=>file.click();
+drop.onclick=(e)=>{if(e.target!==folderPick)file.click();};
+folderPick.onclick=(e)=>{e.stopPropagation();folder.click();};
 ['dragover','dragenter'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add('over');}));
 ['dragleave','drop'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.remove('over');}));
-drop.addEventListener('drop',ev=>{if(ev.dataTransfer.files.length)upload(ev.dataTransfer.files[0]);});
+drop.addEventListener('drop',ev=>{
+  const items=ev.dataTransfer.items;
+  // Prefer the entry API: if a directory was dropped, walk it client-side.
+  if(items&&items.length&&typeof items[0].webkitGetAsEntry==='function'){
+    const entries=[];for(let i=0;i<items.length;i++){const en=items[i].webkitGetAsEntry&&items[i].webkitGetAsEntry();if(en)entries.push(en);}
+    if(entries.some(en=>en&&en.isDirectory)){uploadEntries(entries);return;}
+  }
+  if(ev.dataTransfer.files.length)upload(ev.dataTransfer.files[0]);
+});
 file.onchange=()=>{if(file.files.length)upload(file.files[0]);};
+folder.onchange=()=>{if(folder.files.length)uploadFolderFiles(folder.files);};
 pathBtn.onclick=()=>{const p=pathInput.value.trim();if(!p)return;busy();status.textContent='Importing...';
   fetch('/import-path',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({path:p})}).then(r=>r.json()).then(handleStart).catch(e=>fail(''+e));};
+reBtn.onclick=()=>{busy();status.textContent='Re-analyzing everything...';
+  fetch('/reanalyze',{method:'POST'}).then(r=>r.json()).then(handleStart).catch(e=>fail(''+e));};
+freshBtn.onclick=()=>{
+  if(!confirm('Archive your current Chats, Outputs and Dashboard into a backup folder and start over? Nothing is deleted.'))return;
+  fetch('/start-fresh',{method:'POST'}).then(r=>r.json()).then(j=>{
+    if(j.error){fail(j.error);return;}if(j.busy){fail('A run is already in progress.');return;}
+    location.href='/setup';
+  }).catch(e=>fail(''+e));};
 function upload(f){busy();status.textContent='Uploading '+f.name+'...';
   const fd=new FormData();fd.append('file',f,f.name);
   fetch('/upload',{method:'POST',body:fd}).then(r=>r.json()).then(handleStart).catch(e=>fail(''+e));}
+// ---- folder upload: gather files with relative paths, POST as one batch ---- //
+function uploadFolderFiles(files){
+  busy();status.textContent='Uploading folder ('+files.length+' files)...';
+  const fd=new FormData();
+  for(let i=0;i<files.length;i++){const f=files[i];fd.append('files',f,f.webkitRelativePath||f.name);}
+  fetch('/upload-folder',{method:'POST',body:fd}).then(r=>r.json()).then(handleStart).catch(e=>fail(''+e));
+}
+function readAllEntries(reader){return new Promise((res,rej)=>{const all=[];
+  (function next(){reader.readEntries(function(batch){if(!batch.length){res(all);}else{all.push.apply(all,batch);next();}},rej);})();});}
+function gather(entry,prefix,out){return new Promise((res,rej)=>{
+  if(entry.isFile){entry.file(function(f){out.push({file:f,path:prefix+f.name});res();},rej);}
+  else if(entry.isDirectory){const r=entry.createReader();
+    readAllEntries(r).then(function(entries){
+      let p=Promise.resolve();entries.forEach(function(e){p=p.then(()=>gather(e,prefix+entry.name+'/',out));});
+      p.then(res,rej);},rej);}
+  else{res();}});}
+function uploadEntries(entries){busy();status.textContent='Reading folder...';
+  const out=[];let p=Promise.resolve();
+  entries.forEach(function(en){p=p.then(()=>gather(en,'',out));});
+  p.then(function(){
+    if(!out.length){fail('No files found in that folder.');return;}
+    status.textContent='Uploading folder ('+out.length+' files)...';
+    const fd=new FormData();out.forEach(function(o){fd.append('files',o.file,o.path);});
+    return fetch('/upload-folder',{method:'POST',body:fd}).then(r=>r.json()).then(handleStart);
+  }).catch(e=>fail(''+e));}
+// ---- update banner (fail-silent; server does the actual check) ---- //
+fetch('/version').then(r=>r.json()).then(v=>{if(v&&v.update_available){
+  const b=document.getElementById('updateBanner');if(b){b.style.display='block';
+    if(v.latest)document.getElementById('updateLink').textContent='download '+v.latest;}}}).catch(()=>{});
 function handleStart(j){if(j.error){fail(j.error);return;}if(j.busy){fail('A run is already in progress.');return;}poll();}
 function poll(){if(polling)return;polling=true;const iv=setInterval(()=>{
   fetch('/progress').then(r=>r.json()).then(p=>{
@@ -407,12 +712,48 @@ function poll(){if(polling)return;polling=true;const iv=setInterval(()=>{
 </script></body></html>"""
 
 
+# Fixed floating controls injected into the dashboard: "Add chats" (goes to the
+# setup page) plus a "Re-analyze" action right next to it (M1.3). The re-analyze
+# link POSTs /reanalyze then hands off to /setup to watch progress.
 _ADD_CHATS_SNIPPET = (
-    b'<a href="/setup" style="position:fixed;right:16px;bottom:16px;z-index:9999;'
-    b'background:#4DB6AC;color:#08302c;padding:9px 14px;border-radius:20px;'
-    b'font:600 13px -apple-system,Segoe UI,Roboto,sans-serif;text-decoration:none;'
-    b'box-shadow:0 2px 8px rgba(0,0,0,.4)">\xe2\x9e\x95 Add chats</a>'
+    b'<div style="position:fixed;right:16px;bottom:16px;z-index:9999;display:flex;'
+    b'gap:8px;font:600 13px -apple-system,Segoe UI,Roboto,sans-serif">'
+    b'<a href="/setup" style="background:#4DB6AC;color:#08302c;padding:9px 14px;'
+    b'border-radius:20px;text-decoration:none;box-shadow:0 2px 8px rgba(0,0,0,.4)">'
+    b'\xe2\x9e\x95 Add chats</a>'
+    b'<a href="#" onclick="fetch(\'/reanalyze\',{method:\'POST\'})'
+    b'.then(function(r){return r.json()}).then(function(j){'
+    b'if(j&&j.busy){alert(\'A run is already in progress.\');return}'
+    b'location.href=\'/setup\'}).catch(function(){location.href=\'/setup\'});return false;" '
+    b'style="background:#22262B;color:#4DB6AC;border:1px solid #4DB6AC;'
+    b'padding:9px 14px;border-radius:20px;text-decoration:none;'
+    b'box-shadow:0 2px 8px rgba(0,0,0,.4)">\xe2\x86\xbb Re-analyze</a></div>'
 )
+
+
+def _update_banner_bytes() -> bytes:
+    """A dismissible 'update available' banner, or b'' when up to date/unknown.
+
+    Rendered from the last fail-silent version check (M1.5); empty whenever no
+    newer release is known so an offline/failed check shows nothing.
+    """
+    info = _snapshot_version()
+    if not info.get("update_available"):
+        return b""
+    latest = info.get("latest") or ""
+    label = f"download {latest}" if latest else "download here"
+    html = (
+        '<div id="ca-update" style="position:fixed;left:16px;bottom:16px;'
+        'z-index:9999;background:rgba(77,182,172,.12);border:1px solid #4DB6AC;'
+        'color:#D8D9DA;padding:9px 14px;border-radius:8px;'
+        'font:13px -apple-system,Segoe UI,Roboto,sans-serif;'
+        'box-shadow:0 2px 8px rgba(0,0,0,.4)">'
+        '<span style="cursor:pointer;color:#8e9297;margin-right:8px;font-weight:700" '
+        'onclick="this.parentNode.remove()">×</span>'
+        f'Update available — <a href="{RELEASES_PAGE}" target="_blank" '
+        f'rel="noopener" style="color:#4DB6AC;font-weight:600">{label}</a></div>'
+    )
+    return html.encode("utf-8")
 
 
 def render_setup_html() -> bytes:
@@ -422,19 +763,24 @@ def render_setup_html() -> bytes:
     console window is the only other place it's shown. WORK_ROOT is a local
     filesystem path (never chat content), safe to display.
     """
-    return SETUP_HTML.replace("__WORK_ROOT__", str(WORK_ROOT)).encode("utf-8")
+    html = (SETUP_HTML
+            .replace("__WORK_ROOT__", str(WORK_ROOT))
+            .replace("__RELEASES_PAGE__", RELEASES_PAGE))
+    return html.encode("utf-8")
 
 
 def inject_add_chats(html: bytes) -> bytes:
-    """Insert the fixed 'Add chats' link before </body> at serve time.
+    """Insert the floating 'Add chats' / 'Re-analyze' controls (and an update
+    banner when one is available) before </body> at serve time.
 
     Never touches the on-disk dashboard so ``file://`` usage is unchanged.
     """
+    snippet = _ADD_CHATS_SNIPPET + _update_banner_bytes()
     marker = b"</body>"
     idx = html.rfind(marker)
     if idx == -1:
-        return html + _ADD_CHATS_SNIPPET
-    return html[:idx] + _ADD_CHATS_SNIPPET + html[idx:]
+        return html + snippet
+    return html[:idx] + snippet + html[idx:]
 
 
 # --------------------------------------------------------------------------- #
@@ -470,11 +816,32 @@ def manifest_ready() -> bool:
         return False
 
 
+HIDDEN_FILE = DASH_DIR / "data" / "hidden.json"
+
+
+def _read_hidden() -> list:
+    """Return the persisted hidden-chat id list (empty when absent/invalid)."""
+    try:
+        data = json.loads(HIDDEN_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, str)]
+    except (OSError, ValueError):
+        pass
+    return []
+
+
+def _write_hidden(ids: list) -> None:
+    """Persist the hidden-chat id list to Dashboard/data/hidden.json."""
+    HIDDEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    HIDDEN_FILE.write_text(
+        json.dumps(list(ids), ensure_ascii=False, indent=0), encoding="utf-8")
+
+
 # --------------------------------------------------------------------------- #
 # HTTP handler
 # --------------------------------------------------------------------------- #
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ChatAnalyzer/1.0"
+    server_version = f"ChatAnalyzer/{APP_VERSION}"
 
     def log_message(self, fmt, *args):  # quiet; keep console clean
         pass
@@ -514,6 +881,12 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/progress":
             self._json(200, _snapshot_progress())
             return
+        if route == "/version":
+            self._json(200, _snapshot_version())
+            return
+        if route == "/hidden":
+            self._json(200, _read_hidden())
+            return
         if route == "/setup":
             self._send(200, render_setup_html())
             return
@@ -542,10 +915,42 @@ class Handler(BaseHTTPRequestHandler):
         route = self.path.split("?", 1)[0]
         if route == "/upload":
             self._handle_upload()
+        elif route == "/upload-folder":
+            self._handle_upload_folder()
         elif route == "/import-path":
             self._handle_import_path()
+        elif route == "/reanalyze":
+            self._handle_reanalyze()
+        elif route == "/start-fresh":
+            self._handle_start_fresh()
+        elif route == "/hidden":
+            self._handle_hidden()
         else:
             self._send(404, b"Not found")
+
+    def _handle_hidden(self):
+        """Persist the dashboard's hidden-chat id list to Dashboard/data/hidden.json.
+
+        Body is a JSON array of chat ids. This is the single source of truth the
+        builders (build_connected.py / build_insights.py) read to exclude hidden
+        chats on the next re-analyze.
+        """
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b"[]"
+            data = json.loads(raw.decode("utf-8") or "[]")
+        except Exception as exc:
+            self._json(400, {"error": f"bad hidden payload: {exc}"})
+            return
+        if not isinstance(data, list) or not all(isinstance(x, str) for x in data):
+            self._json(400, {"error": "expected a JSON array of chat ids"})
+            return
+        try:
+            _write_hidden(data)
+        except OSError as exc:
+            self._json(500, {"error": f"could not write hidden.json: {exc}"})
+            return
+        self._json(200, {"saved": True, "count": len(data)})
 
     def _handle_upload(self):
         ctype = self.headers.get("Content-Type", "")
@@ -570,6 +975,67 @@ class Handler(BaseHTTPRequestHandler):
             self._json(409, {"busy": True})
             return
         self._json(200, {"started": True})
+
+    def _handle_upload_folder(self):
+        """Reconstruct a dropped folder on disk and route it through ``_ingest``.
+
+        The client uploads every file in the folder as one multipart batch, each
+        part's filename carrying its path relative to the folder root. We stream
+        the batch into a temp tree (never buffering the whole body) and then run
+        the existing directory-import path over it.
+        """
+        ctype = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in ctype:
+            self._json(400, {"error": "expected multipart/form-data"})
+            return
+        with _state_lock:
+            if _running:
+                self._json(409, {"busy": True})
+                return
+        try:
+            boundary = _boundary(ctype)
+            length = int(self.headers.get("Content-Length", "0"))
+            root = Path(tempfile.mkdtemp(prefix="ca-folder-"))
+            count = stream_multipart_folder(self.rfile, length, boundary, root)
+        except Exception as exc:
+            self._json(400, {"error": f"folder upload failed: {exc}"})
+            return
+        if count == 0:
+            self._json(400, {"error": "no files received in folder upload"})
+            return
+        # If the tree has a single top-level directory (the dropped folder),
+        # import that so the chat folder keeps its real name.
+        entries = [p for p in root.iterdir()]
+        src = entries[0] if len(entries) == 1 and entries[0].is_dir() else root
+        if not _start_run(src, cleanup=False):
+            self._json(409, {"busy": True})
+            return
+        self._json(200, {"started": True})
+
+    def _handle_reanalyze(self):
+        with _state_lock:
+            if _running:
+                self._json(409, {"busy": True})
+                return
+        if not (WORK_ROOT / "Chats").exists():
+            self._json(400, {"error": "No Chats/ to re-analyze yet — import first."})
+            return
+        if not _start_reanalyze():
+            self._json(409, {"busy": True})
+            return
+        self._json(200, {"started": True})
+
+    def _handle_start_fresh(self):
+        with _state_lock:
+            if _running:
+                self._json(409, {"busy": True})
+                return
+        try:
+            backup, moved = start_fresh()
+        except Exception as exc:
+            self._json(500, {"error": f"start fresh failed: {exc}"})
+            return
+        self._json(200, {"ok": True, "backup": str(backup), "moved": moved})
 
     def _handle_import_path(self):
         with _state_lock:
@@ -609,6 +1075,7 @@ def _bind_server() -> ThreadingHTTPServer:
 
 def main() -> None:
     _ensure_runtime_layout()
+    _start_update_check()  # fail-silent GitHub release check in the background
     httpd = _bind_server()
     host, port = httpd.server_address[0], httpd.server_address[1]
     url = f"http://{host}:{port}/"
