@@ -45,6 +45,7 @@ from src.connected_export import (
     dedup_chats,
     build_connected_data,
     write_variant_outputs,
+    load_identities,
 )
 from src.timeutil import DEFAULT_TIMEZONE
 
@@ -154,7 +155,8 @@ def _load_platform(kind: str, chat_dirs: List[Path], excludes: List[str],
 
 
 def _build_and_write(variant: str, chats: List[Chat], owner, owner_names,
-                     platforms: List[str], excluded: int, args) -> Optional[Dict]:
+                     platforms: List[str], excluded: int, args,
+                     identities: Optional[List[Dict]] = None) -> Optional[Dict]:
     if not chats:
         print(f'  [skip] variant {variant!r}: no chats for {"+".join(platforms)}.')
         return None
@@ -165,7 +167,7 @@ def _build_and_write(variant: str, chats: List[Chat], owner, owner_names,
         chats, owner, timezone=args.timezone,
         min_msgs=args.min_msgs, min_replies=args.min_replies,
         excluded_count=excluded, variant=variant, platforms=platforms,
-        owner_names=owner_names,
+        owner_names=owner_names, identities=identities,
     )
     js_path, json_path = write_variant_outputs(payload, args.dash_dir, variant)
     _report(variant, payload, js_path, json_path)
@@ -203,6 +205,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     hidden = _load_hidden(args.dash_dir)
     if hidden:
         print(f'Hidden chats excluded (from {args.dash_dir}/data/hidden.json): {len(hidden)}')
+
+    # Manual cross-platform identity merges (M3.2) — 'all' variant only. A bad
+    # file is reported and skipped rather than crashing the whole build.
+    identities: List[Dict] = []
+    try:
+        identities = load_identities(args.dash_dir)
+    except ValueError as exc:
+        print(f'WARNING: ignoring {args.dash_dir}/data/identities.json — {exc}',
+              file=sys.stderr)
+    if identities:
+        print(f'Identity merges (from {args.dash_dir}/data/identities.json): '
+              f'{len(identities)} (applied to the "all" variant only)')
 
     want_ig = args.platform in ('instagram', 'all', 'everything')
     want_tg = args.platform in ('telegram', 'all', 'everything')
@@ -251,7 +265,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                                           ('telegram', bool(tg_chats))) if present]
         if _build_and_write('all', merged, owner_label, owner_names or None,
                             platforms or ['instagram'],
-                            ig_excluded + tg_excluded, args):
+                            ig_excluded + tg_excluded, args,
+                            identities=identities):
             built += 1
 
     if built == 0:

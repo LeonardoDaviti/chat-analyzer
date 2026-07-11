@@ -2383,6 +2383,13 @@ function renderSkeletonConnected(){
   var owner=state.connected.owner||'You';
   el('app').innerHTML = injectStripHosts(
   '<div class="section" style="padding-bottom:0"><div id="connVariantNote" class="sub" style="font-size:13px"></div></div>'
+  + '<div class="section" id="connMergePanel" style="display:none;padding-bottom:0"><div class="card">'
+    + '<h3>⧉ Merge contacts</h3>'
+    + '<div class="sub" style="font-size:13px">Map the same person across Instagram &amp; Telegram into one entity. '
+    + 'Manual only — nothing is auto-matched. Applies to this “All platforms” view after you re-run analysis.</div>'
+    + '<div id="connMergeBody"></div>'
+    + '<div id="connMergeStatus" class="sub" style="font-size:12px;margin-top:8px"></div>'
+    + '</div></div>'
   + section('Pulse — '+owner+' across every chat','<div class="grid kpis" id="kpiRow"></div>')
   + section('Attention & texting span',
       '<div class="grid cols-2">'
@@ -2429,6 +2436,13 @@ function connLabel(r){
   return (state.connectedVariant==='all'&&r&&r.platform)
     ? pfBadge(r.platform)+' '+r.name : (r?r.name:'');
 }
+/* Per-platform split for a merged (⧉) entity, e.g. "📸 120 · ✈️ 340". Empty
+   string for non-merged rows. Used in tooltips where a platform badge appears. */
+function connSplit(r){
+  if(!r||!r.merged||!r.platforms) return '';
+  var out=[]; for(var p in r.platforms) out.push(pfBadge(p)+' '+fmtNum(r.platforms[p]));
+  return out.length?(' · '+out.join(' · ')):'';
+}
 function renderConnVariantNote(){
   var box=el('connVariantNote'); if(!box) return;
   var v=state.connectedVariant, plats=(state.connected.platforms||[]);
@@ -2450,6 +2464,7 @@ function renderAllConnected(){
   var rt=connRangeTotals(state.start,state.end);
   var has=b.starts.length>0;
   safe(renderConnVariantNote,'cvnote');
+  safe(renderConnMerge,'cmerge');
   safe(function(){renderConnKPIs(rt,has);},'ckpi');
   safe(function(){renderConnTexting(b);},'ctexting');
   safe(function(){renderConnBursts(b);},'cbursts');
@@ -2626,7 +2641,7 @@ function renderConnLeaderboards(){
   var bs=(lb.by_sent_share||[]).slice(0,12);
   var covered=0; bs.forEach(function(r){covered+=r.sent;});
   var totSent=(c.totals||{}).messages_sent||0;
-  var rows=bs.map(function(r){return {name:connLabel(r),v:r.share,tip:fmtNum(r.sent)+' messages'};});
+  var rows=bs.map(function(r){return {name:connLabel(r),v:r.share,tip:fmtNum(r.sent)+' messages'+connSplit(r)};});
   if(totSent>covered) rows.push({name:'Others',v:(totSent-covered)/totSent,
     tip:fmtNum(totSent-covered)+' messages',c:OTHERS_COLOR});
   rows.sort(function(a,b){return b.v-a.v;});
@@ -2865,7 +2880,7 @@ function applyCustomRange(){
 /* selectedPlatforms: null/empty Set => ALL. Otherwise only listed platforms. */
 var selectedPlatforms = null;
 function pfOf(m){ return m.platform||'instagram'; }
-function pfBadge(p){ return p==='telegram'?'✈️':'📸'; }
+function pfBadge(p){ return p==='merged'?'⧉':(p==='telegram'?'✈️':'📸'); }
 function pfLabel(p){ return p==='telegram'?'✈️ Telegram':(p==='instagram'?'📸 Instagram':p); }
 function platformVisible(m){
   return !(selectedPlatforms&&selectedPlatforms.size)||selectedPlatforms.has(pfOf(m));
@@ -2920,6 +2935,94 @@ function hideChat(id){
 function unhideChat(id){
   delete HIDDEN[id]; persistHidden();
   buildChatDropdown(el('chatSearch')?el('chatSearch').value:'');
+}
+
+/* ---------- cross-platform identity merges (M3.2) ----------
+   Persisted to Dashboard/data/identities.json via the launcher's /identities
+   route (http only) AND to localStorage as a file:// remember-only fallback.
+   build_connected.py reads identities.json and merges the mapped contacts into
+   ONE entity in the 'all' variant on the next re-analyze. Member keys are
+   "<platform>:<chat_id>" — the same pair every connected row already carries. */
+var IDENTITIES={identities:[]};
+function loadIdentities(cb){
+  try{ if(typeof localStorage!=='undefined'){
+    var ls=JSON.parse(localStorage.getItem('identities')||'null');
+    if(ls&&ls.identities) IDENTITIES=ls;
+  }}catch(e){}
+  try{ if(typeof XMLHttpRequest!=='undefined'){
+    var x=new XMLHttpRequest(); x.open('GET','/identities',true);
+    x.onreadystatechange=function(){ if(x.readyState===4&&x.status===200){
+      try{ var o=JSON.parse(x.responseText);
+        if(o&&o.identities){ IDENTITIES=o; if(cb) cb(); } }catch(e){} } };
+    x.send();
+  }}catch(e){}
+}
+function persistIdentities(){
+  try{ if(typeof localStorage!=='undefined') localStorage.setItem('identities',JSON.stringify(IDENTITIES)); }catch(e){}
+  // Writing to disk only works when the launcher serves the page (http). On
+  // file:// the POST can't reach a server and builders can't read localStorage,
+  // so no-op with a visible hint (same UX class as hide-chats).
+  if(typeof location!=='undefined' && location.protocol==='file:'){
+    connMergeStatus('Served from file:// — remembered in this browser only. Open via the launcher to save merges for analysis.',true);
+    return false;
+  }
+  try{ if(typeof XMLHttpRequest!=='undefined'){
+    var x=new XMLHttpRequest(); x.open('POST','/identities',true);
+    x.setRequestHeader('Content-Type','application/json'); x.send(JSON.stringify(IDENTITIES));
+  }}catch(e){}
+  return true;
+}
+function connMergeStatus(msg,warn){
+  var s=el('connMergeStatus'); if(!s) return;
+  s.innerHTML='<span style="color:'+(warn?'#E4A11B':'var(--muted)')+'">'+esc(msg)+'</span>';
+}
+function renderConnMerge(){
+  var panel=el('connMergePanel'); if(!panel) return;
+  if(state.connectedVariant!=='all'){ panel.style.display='none'; return; }
+  panel.style.display='';
+  var body=el('connMergeBody'); if(!body) return;
+  // Offer only UNMERGED contacts as checkboxes (already-merged ⧉ entities are
+  // the result of an existing identity and are managed via unmerge below).
+  var contacts=((state.connected&&state.connected.contacts)||[]).filter(function(x){return x.platform!=='merged';});
+  var h='<div class="merge-pick" style="max-height:180px;overflow:auto;margin:8px 0;display:flex;flex-wrap:wrap;gap:6px">';
+  contacts.forEach(function(x){
+    var key=x.platform+':'+x.chat_id;
+    h+='<label class="cmp-opt" style="cursor:pointer"><input type="checkbox" class="cmerge-cb" data-key="'+esc(key)+'"> '
+      +pfBadge(x.platform)+' '+esc(x.name)+'</label>';
+  });
+  if(!contacts.length) h+='<span class="faint">No contacts available to merge.</span>';
+  h+='</div><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+    +'<input id="connMergeName" placeholder="Display name for the merged person" '
+    +'style="flex:1;min-width:180px;padding:6px 10px;background:var(--panel-2);border:1px solid var(--border);border-radius:6px;color:var(--text)">'
+    +'<button class="chip" onclick="connMergeSelected()">⧉ Merge selected as…</button></div>';
+  var ids=(IDENTITIES.identities||[]);
+  if(ids.length){
+    h+='<div style="margin-top:12px;margin-bottom:4px"><b>Existing merges</b> <span class="faint">(applied on next re-analyze)</span></div>';
+    ids.forEach(function(it,i){
+      h+='<div class="vocab-line" style="display:flex;justify-content:space-between;align-items:center">'
+        +'<span>⧉ '+esc(it.name)+' <span class="faint">('+((it.members||[]).length)+' members)</span></span>'
+        +'<span class="dd-unhide" style="cursor:pointer" onclick="connUnmerge('+i+')">↺ unmerge</span></div>';
+    });
+  }
+  body.innerHTML=h;
+}
+function connMergeSelected(){
+  var boxes=(typeof document!=='undefined'&&document.querySelectorAll)?document.querySelectorAll('.cmerge-cb'):[];
+  var members=[]; for(var i=0;i<boxes.length;i++){ if(boxes[i].checked) members.push(boxes[i].getAttribute('data-key')); }
+  var name=((el('connMergeName')&&el('connMergeName').value)||'').trim();
+  if(members.length<2){ connMergeStatus('Select at least 2 contacts to merge.',true); return; }
+  if(!name){ connMergeStatus('Enter a display name for the merged person.',true); return; }
+  IDENTITIES.identities.push({name:name,members:members});
+  var ok=persistIdentities();
+  renderConnMerge();
+  if(ok) connMergeStatus('Saved “'+name+'”. Re-run analysis to apply the merge.',false);
+}
+function connUnmerge(i){
+  var it=IDENTITIES.identities[i]; if(!it) return;
+  IDENTITIES.identities.splice(i,1);
+  var ok=persistIdentities();
+  renderConnMerge();
+  if(ok) connMergeStatus('Removed “'+it.name+'”. Re-run analysis to apply.',false);
 }
 function visibleManifest(){ return MANIFEST.filter(function(m){return platformVisible(m)&&!isHidden(m);}); }
 function buildPlatformFilter(){
@@ -3323,6 +3426,9 @@ function init(){
   el('monthSel').onchange=function(){ if(state.chat||state.isConnected||state.isCompare) applyMonth(this.value); };
   el('applyRange').onclick=applyCustomRange;
   el('dFrom').onchange=function(){}; el('dTo').onchange=function(){};
+  // Load identity-merge map (localStorage + launcher /identities); refresh the
+  // merge panel if the connected 'all' view is already showing.
+  loadIdentities(function(){ if(state.isConnected) safe(renderConnMerge,'cmerge'); });
   // Load hidden-chat state (localStorage + launcher /hidden) before first paint.
   loadHidden(function(){ buildChatDropdown(el('chatSearch')?el('chatSearch').value:'');
     // If the currently-shown chat just got hidden by a synced list, jump away.

@@ -346,6 +346,21 @@ try {
   g("applyPreset('90')");
   console.log('connected preset OK | setOptions:', g('window.__setOptions'));
 
+  // --- M3.2: "Merge contacts" manage panel present in connected-all, plus a
+  //     synthetic-fixture render of a merged (⧉) entity. No identities are ever
+  //     created over the real contacts — we only exercise the render helpers.
+  g('safe(renderConnMerge,"cmerge")'); flush();
+  const mergeHtml = byId['connMergeBody'] ? byId['connMergeBody']._html : '';
+  const badge = g("pfBadge('merged')");
+  const mlabel = g("connLabel({name:'Fixture',platform:'merged'})");
+  const msplit = g("connSplit({merged:true,platforms:{instagram:2,telegram:1}})");
+  console.log('connected merge panel | hasPicker:', /Merge selected/.test(mergeHtml),
+    '| badge:', badge, '| label:', mlabel, '| split:', msplit);
+  if (!/Merge selected/.test(mergeHtml)) throw new Error('merge manage panel not rendered in connected-all');
+  if (badge !== '⧉') throw new Error('merged badge should be ⧉');
+  if (mlabel.indexOf('⧉') !== 0) throw new Error('merged label should lead with the ⧉ badge');
+  if (!/📸/.test(msplit) || !/✈/.test(msplit)) throw new Error('merged split should list both platforms');
+
   // --- M3.1: reaction-latency leaderboards (both directions) in Contact
   //     leaderboards. Charts render whenever ≥1 contact clears the ≥30 gate.
   g("applyPreset('all')"); flush();

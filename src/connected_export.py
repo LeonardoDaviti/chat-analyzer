@@ -374,6 +374,161 @@ def _owner_set(owner: Any) -> frozenset:
 
 
 # --------------------------------------------------------------------------- #
+# Cross-platform identity merge  (M3.2 — MANUAL only)
+# --------------------------------------------------------------------------- #
+#
+# Member-key convention: ``"<platform>:<chat_id>"``.
+#
+#   * ``<platform>`` is the contact's ``platform`` field / ``Chat.platform`` —
+#     ``"instagram"`` or ``"telegram"``.
+#   * ``<chat_id>`` is the connected slug id already emitted for every contact
+#     and every leaderboard row (``contact["chat_id"]``), e.g.
+#     ``"Mariam_Merabishvili_3"`` or ``"Drxnm"``.
+#
+# Why the composite key (and not the bare slug): a slug is only unique WITHIN a
+# platform — an Instagram contact and a Telegram contact can slugify to the same
+# string — so the ``<platform>:`` prefix is what makes the member key stable and
+# unambiguous across platforms. It is also the exact pair the dashboard already
+# carries on every row, so the "Merge contacts" UI can build the key with no
+# extra lookup. There is NO automatic name matching anywhere: identities are only
+# ever the ones a human explicitly wrote into ``identities.json``.
+
+
+def load_identities(dash_dir: str) -> List[Dict[str, Any]]:
+    """Load ``<dash_dir>/data/identities.json`` (manual cross-platform merges).
+
+    Shape: ``{"identities": [{"name": "<display>", "members": ["<plat>:<id>", ...]}]}``.
+
+    * Absent file -> ``[]`` (a strict no-op: no merging happens).
+    * Malformed file (bad JSON, wrong top-level shape, or a bad identity entry)
+      -> ``ValueError``. A false merge poisons every connected metric, so we
+      reject rather than guess.
+
+    Returns a normalized list of ``{"name": str, "members": [str, ...]}``.
+    """
+    path = Path(dash_dir) / 'data' / 'identities.json'
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f'identities.json is not readable JSON: {exc}')
+    if not isinstance(data, dict) or not isinstance(data.get('identities'), list):
+        raise ValueError("identities.json must be an object with an 'identities' list")
+    out: List[Dict[str, Any]] = []
+    for ident in data['identities']:
+        if not isinstance(ident, dict):
+            raise ValueError('each identity must be an object')
+        name = ident.get('name')
+        members = ident.get('members')
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError('each identity needs a non-empty string "name"')
+        if (not isinstance(members, list) or not members
+                or not all(isinstance(m, str) and ':' in m for m in members)):
+            raise ValueError('each identity needs a "members" list of "<platform>:<chat_id>" keys')
+        out.append({'name': name.strip(), 'members': list(members)})
+    return out
+
+
+def _member_key(platform: str, chat_id: str) -> str:
+    return f'{platform}:{chat_id}'
+
+
+def _apply_identity_merge(contacts: Dict[str, Dict[str, Any]],
+                          sent_by_month_contact: Dict[str, Counter],
+                          identities: List[Dict[str, Any]]) -> None:
+    """Merge mapped contacts (``all`` variant only) into single entities, IN PLACE.
+
+    Operates on the raw per-contact accumulators BEFORE finalization, so every
+    downstream metric recomputes naturally from combined observations: volumes
+    and counts are summed, reply-latency medians are re-taken over the CONCATENATED
+    raw latency samples (a true combined median, not a median-of-medians),
+    initiation share re-divides summed initiations/sessions, reciprocity re-divides
+    summed sent/received, and first/last day become min/max across members. The
+    per-contact ``sent_by_month`` rows (feeding Gini / novelty) are merged too so
+    the merged person counts once. A merged entity keeps ``platform == "merged"``
+    plus a ``_platforms`` breakdown ``{platform: owner_sent}`` for the ⧉ badge.
+
+    Only identities with >=2 PRESENT member contacts are merged; a lone member is
+    left untouched (it is just an ordinary single-platform contact).
+    """
+    key_to_ident: Dict[str, int] = {}
+    for i, ident in enumerate(identities):
+        for m in ident['members']:
+            key_to_ident[m] = i
+
+    grouped: Dict[int, List[str]] = defaultdict(list)
+    for cid, ct in contacts.items():
+        key = _member_key(ct['platform'], cid)
+        idx = key_to_ident.get(key)
+        if idx is not None:
+            grouped[idx].append(cid)
+
+    for idx, cids in grouped.items():
+        if len(cids) < 2:
+            continue
+        _merge_contact_group(contacts, sent_by_month_contact, cids,
+                             identities[idx]['name'])
+
+
+_ADD_INT_FIELDS = ('sent', 'received', 'emoji_sent', 'media_sent',
+                   'initiations', 'sessions', 'night_msgs',
+                   '_o_msgs', '_o_words', '_o_wlen', '_o_q', '_o_i', '_o_pos',
+                   '_o_em', '_c_msgs', '_c_em')
+_ADD_COUNTER_FIELDS = ('session_types', '_o_lang', '_month_vol')
+_EXTEND_LIST_FIELDS = ('_lat', '_lat_ts', '_rx_you', '_rx_them')
+
+
+def _merge_contact_group(contacts: Dict[str, Dict[str, Any]],
+                         sent_by_month_contact: Dict[str, Counter],
+                         cids: List[str], name: str) -> None:
+    """Fold the accumulators of ``cids`` into one merged entity named ``name``."""
+    base = 'merged_' + (re.sub(r'[^0-9A-Za-z]+', '_', name).strip('_') or 'identity')
+    merged_id = base
+    n = 2
+    while merged_id in contacts and merged_id not in cids:
+        merged_id = f'{base}_{n}'
+        n += 1
+
+    parts = [contacts[c] for c in cids]
+    merged = _blank_contact(name, merged_id, 'merged')
+    platforms: Counter = Counter()
+
+    for ct in parts:
+        platforms[ct['platform']] += ct['sent']
+        for f in _ADD_INT_FIELDS:
+            merged[f] += ct[f]
+        for f in _ADD_COUNTER_FIELDS:
+            merged[f].update(ct[f])
+        for f in _EXTEND_LIST_FIELDS:
+            merged[f].extend(ct[f])
+        merged['_months'].update(ct['_months'])
+
+    firsts = [ct for ct in parts if ct['_first_ts'] is not None]
+    lasts = [ct['_last_ts'] for ct in parts if ct['_last_ts'] is not None]
+    if firsts:
+        earliest = min(firsts, key=lambda ct: ct['_first_ts'])
+        merged['_first_ts'] = earliest['_first_ts']
+        merged['_first_sender'] = earliest['_first_sender']
+    merged['_last_ts'] = max(lasts) if lasts else None
+    merged['_merged'] = True
+    merged['_platforms'] = dict(platforms)
+
+    for c in cids:
+        del contacts[c]
+    contacts[merged_id] = merged
+
+    # Fold per-contact monthly sent rows (Gini / novelty see one person).
+    for counter in sent_by_month_contact.values():
+        moved = 0
+        for c in cids:
+            if c in counter:
+                moved += counter.pop(c)
+        if moved:
+            counter[merged_id] += moved
+
+
+# --------------------------------------------------------------------------- #
 # Session typing
 # --------------------------------------------------------------------------- #
 
@@ -434,7 +589,8 @@ def build_connected_data(chats: List[Chat], owner: Any,
                          excluded_count: int = 0,
                          variant: str = 'all',
                          platforms: Optional[List[str]] = None,
-                         owner_names: Optional[Any] = None) -> Dict[str, Any]:
+                         owner_names: Optional[Any] = None,
+                         identities: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Compute the full CONNECTED payload from loaded chats.
 
     ``variant`` is one of ``instagram`` / ``telegram`` / ``all`` and is echoed in
@@ -666,6 +822,12 @@ def build_connected_data(chats: List[Chat], owner: Any,
             texting_min_month[mo] += dur
             texting_min_week[wk] += dur
 
+    # ---- cross-platform identity merge (manual; 'all' variant only) ---- #
+    # Merge BEFORE finalization so shares/medians/dates all recompute from the
+    # combined raw accumulators. Per-platform variants stay unmerged.
+    if variant == 'all' and identities:
+        _apply_identity_merge(contacts, sent_by_month_contact, identities)
+
     # ---- finalize contacts ---- #
     total_night = sum(ct['night_msgs'] for ct in contacts.values())
     total_sent = sum(ct['sent'] for ct in contacts.values())
@@ -713,6 +875,11 @@ def build_connected_data(chats: List[Chat], owner: Any,
             'months_active': len(ct['_months']),
             'gated': gated,
         }
+        if ct.get('_merged'):
+            # Merged cross-platform identity: badge as ⧉ and keep the
+            # per-platform owner-sent split for tooltips/labels.
+            out['merged'] = True
+            out['platforms'] = ct['_platforms']
         contact_list.append(out)
         if not gated:
             emoji_rates.append(emoji_rate)
@@ -724,7 +891,9 @@ def build_connected_data(chats: List[Chat], owner: Any,
     # ---- leaderboards ---- #
     ungated = [c for c in contact_list if not c['gated']]
     by_sent = [{'name': c['name'], 'platform': c['platform'], 'sent': c['sent'],
-                'share': round(c['sent'] / total_sent, 4) if total_sent else 0.0}
+                'share': round(c['sent'] / total_sent, 4) if total_sent else 0.0,
+                **({'merged': True, 'platforms': c['platforms']}
+                   if c.get('merged') else {})}
                for c in contact_list[:25]]
     attention_hierarchy = sorted(
         ({'name': c['name'], 'platform': c['platform'],

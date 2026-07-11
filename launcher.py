@@ -1032,6 +1032,36 @@ def _write_hidden(ids: list) -> None:
         json.dumps(list(ids), ensure_ascii=False, indent=0), encoding="utf-8")
 
 
+def identities_path() -> Path:
+    """Active profile's Dashboard/data/identities.json (build_connected merge map)."""
+    return dash_dir() / "data" / "identities.json"
+
+
+def _read_identities() -> dict:
+    """Return the persisted identity-merge map ({"identities":[...]}).
+
+    Empty/absent/invalid -> ``{"identities": []}`` (never an error — the merge is
+    a strict no-op then). Mirrors the hidden.json accessors, profile-aware via
+    ``dash_dir()``.
+    """
+    try:
+        data = json.loads(identities_path().read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("identities"), list):
+            return {"identities": [x for x in data["identities"]
+                                   if isinstance(x, dict)]}
+    except (OSError, ValueError):
+        pass
+    return {"identities": []}
+
+
+def _write_identities(obj: dict) -> None:
+    """Persist the identity-merge map to the active Dashboard/data/identities.json."""
+    ip = identities_path()
+    ip.parent.mkdir(parents=True, exist_ok=True)
+    ip.write_text(
+        json.dumps(obj, ensure_ascii=False, indent=0), encoding="utf-8")
+
+
 # --------------------------------------------------------------------------- #
 # HTTP handler
 # --------------------------------------------------------------------------- #
@@ -1082,6 +1112,9 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/hidden":
             self._json(200, _read_hidden())
             return
+        if route == "/identities":
+            self._json(200, _read_identities())
+            return
         if route == "/profile":
             self._json(200, {"active": active_profile(),
                              "profiles": list_profiles()})
@@ -1124,6 +1157,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_start_fresh()
         elif route == "/hidden":
             self._handle_hidden()
+        elif route == "/identities":
+            self._handle_identities()
         elif route == "/profile":
             self._handle_profile()
         else:
@@ -1201,6 +1236,46 @@ class Handler(BaseHTTPRequestHandler):
             self._json(500, {"error": f"could not write hidden.json: {exc}"})
             return
         self._json(200, {"saved": True, "count": len(data)})
+
+    def _handle_identities(self):
+        """Persist the cross-platform identity-merge map to identities.json.
+
+        Body: ``{"identities": [{"name": <str>, "members": ["<plat>:<id>", ...]}]}``.
+        This is the single source of truth build_connected.py reads to merge the
+        same person across platforms in the 'all' variant on the next re-analyze
+        (mirrors the /hidden route; profile-aware via the accessors).
+        """
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length) if length else b"{}"
+            data = json.loads(raw.decode("utf-8") or "{}")
+        except Exception as exc:
+            self._json(400, {"error": f"bad identities payload: {exc}"})
+            return
+        idents = data.get("identities") if isinstance(data, dict) else None
+        if not isinstance(idents, list):
+            self._json(400, {"error": "expected an object with an 'identities' list"})
+            return
+        clean = []
+        for it in idents:
+            if not isinstance(it, dict):
+                self._json(400, {"error": "each identity must be an object"})
+                return
+            name, members = it.get("name"), it.get("members")
+            if not isinstance(name, str) or not name.strip():
+                self._json(400, {"error": "each identity needs a non-empty 'name'"})
+                return
+            if (not isinstance(members, list) or not members
+                    or not all(isinstance(m, str) and ":" in m for m in members)):
+                self._json(400, {"error": "each identity needs 'members' of '<platform>:<chat_id>'"})
+                return
+            clean.append({"name": name.strip(), "members": list(members)})
+        try:
+            _write_identities({"identities": clean})
+        except OSError as exc:
+            self._json(500, {"error": f"could not write identities.json: {exc}"})
+            return
+        self._json(200, {"saved": True, "count": len(clean)})
 
     def _handle_upload(self):
         ctype = self.headers.get("Content-Type", "")
