@@ -148,7 +148,9 @@ def test_contact_totals_and_initiation():
     c = make_chat("a", [OWNER, "A"], raw)
     p = build_connected_data([c], OWNER, TZ, min_msgs=0, min_replies=0)
     ct = next(x for x in p["contacts"] if x["name"] == "A")
-    assert ct["sent"] == 3          # 2 text + 1 media owner msgs
+    # "sent" = REAL TEXT only now (MONITORING_AUDIT §3.2): the media owner msg no
+    # longer inflates the headline count. media_sent still tracks the media.
+    assert ct["sent"] == 2          # 2 text owner msgs (media excluded)
     assert ct["received"] == 2
     assert ct["media_sent"] == 1
     assert ct["initiations"] == 1
@@ -629,3 +631,24 @@ def test_owner_aggregate_daily_table():
     assert day["received"] == 1       # contact sent 1
     assert len(day["hours"]) == 24
     assert p["range"]["first_day"] is not None
+
+
+def test_sent_counts_real_text_only():
+    """Connected "messages sent" counts REAL TEXT only, matching the per-chat
+    definition (MONITORING_AUDIT §3.2). A media / non-real owner message adds to
+    media_sent but NOT to the headline sent / totals / reciprocity counts."""
+    raw = [
+        msg(BASE, OWNER),                       # real text  -> sent
+        msg(BASE + MIN, OWNER),                 # real text  -> sent
+        msg(BASE + 2 * MIN, OWNER, media=True), # media only -> NOT sent
+        msg(BASE + 3 * MIN, "A"),               # real text  -> received
+        msg(BASE + 4 * MIN, "A", media=True),   # media only -> NOT received
+    ]
+    c = make_chat("a", [OWNER, "A"], raw)
+    p = build_connected_data([c], OWNER, TZ, min_msgs=0, min_replies=0)
+    ct = next(x for x in p["contacts"] if x["name"] == "A")
+    assert ct["sent"] == 2                       # 2 real text (media excluded)
+    assert ct["received"] == 1                   # 1 real text (media excluded)
+    assert ct["media_sent"] == 1                 # media still tracked separately
+    assert p["totals"]["messages_sent"] == 2     # headline built on real text
+    assert p["reciprocity"]["sent_total"] == 2

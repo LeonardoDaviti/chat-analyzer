@@ -55,7 +55,10 @@ from src.analyzer_v3 import _split_sessions, EMOJI_PATTERN
 RESPONSE_WINDOW_MS = 30 * 60 * 1000        # 30 min: question / bid response window
 DOUBLE_TEXT_GAP_MS = 10 * 60 * 1000        # 10 min: double-text threshold
 RUPTURE_SILENCE_MS = 48 * 60 * 60 * 1000   # 48 h: abnormal silence after a session
-NIGHT_HOURS = frozenset({23, 0, 1, 2})     # 23:00-02:59 "sacred hours"
+# Unified night window across every surface (per-chat daily table, group
+# metrics, and — matching connected_export.NIGHT_HOURS — the connected view):
+# 00:00–05:59. See docs/MONITORING_AUDIT §4/§5. Previously {23,0,1,2}.
+NIGHT_HOURS = frozenset(range(0, 6))       # 00:00-05:59 "night"
 STREAK_CAP = 10                            # streak histogram cap ("10+")
 HALF_LIFE_MIN_GAP_MS = 5 * 60 * 1000       # floor for the "conversation died" gap
 

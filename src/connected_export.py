@@ -710,11 +710,18 @@ def build_connected_data(chats: List[Chat], owner: Any,
             is_owner = r['sender_name'] in owners
             cm = ct['_cm'][r['mon']]
             if is_owner:
-                ct['sent'] += 1
+                # "messages sent" = REAL TEXT only (unified with the per-chat
+                # definition; docs/MONITORING_AUDIT §3.2). Stickers / media / call
+                # events no longer inflate the headline sent count / night count.
+                if r['real']:
+                    ct['sent'] += 1
+                    cm['sent'] += 1
+                    if r['h'] in NIGHT_HOURS:
+                        ct['night_msgs'] += 1
+                        cm['night_sent'] += 1
                 ct['emoji_sent'] += r['em']
                 ct['media_sent'] += r['media']
                 ct['_o_msgs'] += 1
-                cm['sent'] += 1
                 cm['emoji_sent'] += r['em']
                 if r['real']:
                     ct['_o_words'] += r['w']
@@ -730,18 +737,16 @@ def build_connected_data(chats: List[Chat], owner: Any,
                     cm['lang_total'] += 1
                     if r['lang'] == 'georgian':
                         cm['lang_geo'] += 1
-                if r['h'] in NIGHT_HOURS:
-                    ct['night_msgs'] += 1
-                    cm['night_sent'] += 1
             else:
-                ct['received'] += 1
-                ct['_c_msgs'] += 1
-                ct['_c_em'] += r['em']
-                cm['recv'] += 1
-                cm['recv_emoji'] += r['em']
+                # "messages received" = REAL TEXT only, same unified definition.
                 if r['real']:
+                    ct['received'] += 1
+                    cm['recv'] += 1
                     ct['_c_words'] += r['w']
                     cm['words_recv'] += r['w']
+                ct['_c_msgs'] += 1
+                ct['_c_em'] += r['em']
+                cm['recv_emoji'] += r['em']
         ct['_first_ts'] = first_ts
         ct['_last_ts'] = last_ts
         ct['_months'] = {r['mon'] for r in c.recs if not r['sys']}
@@ -886,24 +891,26 @@ def build_connected_data(chats: List[Chat], owner: Any,
             last_ts = r['timestamp_ms']
             cm = gc['_cm'][r['mon']]
             if r['sender_name'] in owners:
-                gc['sent'] += 1
-                gc['emoji_sent'] += r['em']
-                cm['sent'] += 1
-                cm['emoji_sent'] += r['em']
-                if r['h'] in NIGHT_HOURS:
-                    gc['night_msgs'] += 1
-                    cm['night_sent'] += 1
+                # Volume-flow "sent" to a group = REAL TEXT only (unified with the
+                # per-chat / dyad definition; docs/MONITORING_AUDIT §3.2).
                 if r['real']:
+                    gc['sent'] += 1
+                    cm['sent'] += 1
+                    if r['h'] in NIGHT_HOURS:
+                        gc['night_msgs'] += 1
+                        cm['night_sent'] += 1
                     gc['_o_words'] += r['w']
                     cm['words_sent'] += r['w']
                     cm['chars_sent'] += r['ch']
+                gc['emoji_sent'] += r['em']
+                cm['emoji_sent'] += r['em']
             else:
-                gc['received'] += 1
-                cm['recv'] += 1
-                cm['recv_emoji'] += r['em']
                 if r['real']:
+                    gc['received'] += 1
+                    cm['recv'] += 1
                     gc['_c_words'] += r['w']
                     cm['words_recv'] += r['w']
+                cm['recv_emoji'] += r['em']
         gc['_first_ts'] = first_ts
         gc['_last_ts'] = last_ts
         gc['_months'] = {r['mon'] for r in c.recs if not r['sys']}

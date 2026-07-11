@@ -18,7 +18,11 @@ def get_media_stats(messages: List[Dict]) -> Dict[str, Any]:
         'videos': 0,
         'audio_files': 0,
         'shares': 0,
-        'calls': 0
+        # ONLY answered calls (truthy call_duration) are counted here; missed /
+        # zero-duration calls are excluded. The name says so — the dashboard's
+        # calls card counts ALL call events via the shared ``_is_call`` predicate
+        # (see docs/MONITORING_AUDIT §3.3). Renamed from the misleading ``calls``.
+        'answered_calls': 0
     })
     
     for msg in messages:
@@ -43,9 +47,10 @@ def get_media_stats(messages: List[Dict]) -> Dict[str, Any]:
         if msg.get('share'):
             media_by_sender[sender]['shares'] += 1
         
-        # Count calls
+        # Count answered calls only (truthy duration). Missed calls are excluded
+        # by design — the field is named ``answered_calls`` to say so.
         if msg.get('call_duration'):
-            media_by_sender[sender]['calls'] += 1
+            media_by_sender[sender]['answered_calls'] += 1
     
     # Calculate totals
     totals = {
@@ -53,7 +58,7 @@ def get_media_stats(messages: List[Dict]) -> Dict[str, Any]:
         'videos': sum(s['videos'] for s in media_by_sender.values()),
         'audio_files': sum(s['audio_files'] for s in media_by_sender.values()),
         'shares': sum(s['shares'] for s in media_by_sender.values()),
-        'calls': sum(s['calls'] for s in media_by_sender.values())
+        'answered_calls': sum(s['answered_calls'] for s in media_by_sender.values())
     }
     
     return {

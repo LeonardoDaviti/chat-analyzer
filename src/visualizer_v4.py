@@ -304,7 +304,7 @@ class MetricsVisualizerV4:
         for u, c in zip(users, colors):
             ns = [series[b].get(u, {}).get('night_share', 0.0) for b in buckets]
             ax_trend.plot(buckets, ns, marker='o', label=u, color=c, linewidth=2)
-        ax_trend.set_ylabel('Night share (23:00-03:00)')
+        ax_trend.set_ylabel('Night share (00:00-05:59)')
         ax_trend.set_title('Monthly Sacred-Hours (late-night) Share', fontsize=12, fontweight='bold')
         ax_trend.tick_params(axis='x', rotation=45)
         ax_trend.legend(fontsize=8)

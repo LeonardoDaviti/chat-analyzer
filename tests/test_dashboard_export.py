@@ -87,9 +87,10 @@ def test_daily_aggregate_counts(synthetic):
     # match — same convention as metrics_v4): msg3=1, msg7 (pair)=1, msg9=1 => 3
     assert a['emoji'] == 3
     assert b['emoji'] == 0
-    # night messages (hours 23/0/1/2)
-    assert a['night_msgs'] == 2  # 23:30 + 01:00
-    assert b['night_msgs'] == 1  # 23:40
+    # night messages (unified window 00:00–05:59): only 01:00 qualifies now;
+    # 23:30 / 23:40 are no longer "night" (MONITORING_AUDIT §4/§5).
+    assert a['night_msgs'] == 1  # 01:00
+    assert b['night_msgs'] == 0  # 23:40 is no longer night
     # media (all messages)
     assert a['media'] == 0
     assert b['media'] == 1
@@ -137,14 +138,32 @@ def test_lifetime_missing_keys_safe():
 
 
 def test_slug_uniqueness():
+    # Same ASCII name repeated: first keeps the clean base, further collisions get
+    # a STABLE name-hash suffix (not an order-dependent counter).
     taken = set()
     s1 = slugify('Ann', taken)
     s2 = slugify('Ann', taken)
     s3 = slugify('Ann', taken)
     assert s1 == 'Ann'
-    assert s2 == 'Ann_2'
-    assert s3 == 'Ann_3'
+    assert s2.startswith('Ann-')
+    assert s3.startswith('Ann-')
     assert len({s1, s2, s3}) == 3
+
+
+def test_slug_deterministic_order_independent():
+    """The same name yields the same id regardless of processing order — this is
+    what lets the per-chat and connected exporters agree on a chat's id
+    (MONITORING_AUDIT §3.4). Non-ASCII (e.g. Georgian) titles are the key case:
+    they no longer collapse to order-numbered ``chat``/``chat_2``/``chat_8``."""
+    geo1 = 'გამოწერილი'  # some Georgian title
+    geo2 = 'სელი'                                        # a different Georgian title
+    # Exporter 1 processes geo1 then geo2; exporter 2 processes them reversed.
+    t1 = set(); id1_a = slugify(geo1, t1); id1_b = slugify(geo2, t1)
+    t2 = set(); id2_b = slugify(geo2, t2); id2_a = slugify(geo1, t2)
+    assert id1_a == id2_a          # geo1 gets the same id in both orders
+    assert id1_b == id2_b          # geo2 too
+    assert id1_a != id1_b          # and the two titles never collide
+    assert id1_a.startswith('chat-') and id1_b.startswith('chat-')
 
 
 def test_slug_sanitizes_unsafe_chars():
@@ -187,3 +206,66 @@ def test_manifest_js_content():
     parsed = json.loads(js[start:].rstrip().rstrip(';\n').rstrip(';'))
     assert parsed[0]['messages'] == 100
     assert parsed[0]['name'] == 'A</script>'  # decoded back from escaped form
+
+
+# --------------------------------------------------------------------------- #
+# MONITORING_AUDIT fixes: median latency, unified night window, calls label
+# --------------------------------------------------------------------------- #
+
+def test_reply_latency_p50_is_true_median_not_mean():
+    """The daily cell ships resp_lat_p50_min = the TRUE per-day reply-latency
+    median. On data whose mean and median differ wildly it must equal the median
+    (and the honest lifetime median from response_time.py), NOT the pooled mean
+    the chart used to draw under its "Median" title (MONITORING_AUDIT §3.1)."""
+    A, B = 'Alice', 'Bob'
+    base = _ts(2026, 6, 1, 8, 0)
+    MIN = 60 * 1000
+    # Alternating A/B; every A->B gap is a Bob reply. Nine 1-min replies + one
+    # 110-min reply (still inside the 2h session gap) => median 1, mean ~11.9.
+    mins = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 128]
+    senders = [A, B] * 10
+    msgs = [_msg(senders[i], base + mins[i] * MIN, 'm') for i in range(len(mins))]
+
+    daily = build_daily_aggregates(msgs, [A, B])
+    assert len(daily) == 1                       # all on one calendar day
+    bob = next(iter(daily.values()))[B]
+    assert bob['resp_lat_n'] == 10
+    mean = bob['resp_lat_sum_min'] / bob['resp_lat_n']
+    assert mean > 10                             # pooled mean ~11.9 min
+    assert bob['resp_lat_p50_min'] == pytest.approx(1.0)   # true median = 1 min
+    assert mean > 10 * bob['resp_lat_p50_min']   # mean and median differ wildly
+
+    # The shipped p50 agrees with the honest lifetime median (response_time.py),
+    # so the chart (per-bucket median) and the lifetime block match at full range.
+    from src.response_time import calculate_response_times
+    rt = calculate_response_times(msgs, B)
+    assert bob['resp_lat_p50_min'] == pytest.approx(rt['my_median_response_minutes'])
+
+
+def test_night_window_is_midnight_to_six():
+    """Night = 00:00–05:59 everywhere now (MONITORING_AUDIT §4/§5). 03:00 counts;
+    23:00 does not."""
+    A, B = 'Alice', 'Bob'
+    msgs = [
+        _msg(A, _ts(2026, 6, 1, 3, 0), 'deep night'),    # 03:00 -> night
+        _msg(A, _ts(2026, 6, 1, 5, 30), 'still night'),  # 05:30 -> night
+        _msg(A, _ts(2026, 6, 1, 23, 0), 'evening'),      # 23:00 -> NOT night
+        _msg(A, _ts(2026, 6, 1, 12, 0), 'noon'),         # noon -> NOT night
+    ]
+    tot = _totals(build_daily_aggregates(msgs, [A, B]), A)
+    assert tot['night_msgs'] == 2                         # 03:00 + 05:30 only
+
+
+def test_media_stats_answered_calls_label():
+    """media_stats renames the answered-only count to ``answered_calls`` so no
+    consumer mistakes it for the total call count (MONITORING_AUDIT §3.3)."""
+    from src.media_analyzer import get_media_stats
+    msgs = [
+        {'sender_name': 'A', 'call_duration': 120},   # answered
+        {'sender_name': 'A', 'call_duration': 0},     # missed -> NOT counted
+        {'sender_name': 'A'},                          # not a call
+    ]
+    stats = get_media_stats(msgs)
+    assert 'calls' not in stats['totals']              # misleading name is gone
+    assert stats['totals']['answered_calls'] == 1      # answered-only, truthfully
+    assert stats['by_sender']['A']['answered_calls'] == 1

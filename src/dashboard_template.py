@@ -426,14 +426,14 @@ function renderSkeleton(){
         '<div class="chart" id="cCal"></div>'))
   + section('Balance & depth',
       '<div class="grid cols-2">'
-      + card('Initiation share','Who opens conversations (per bucket)','<div class="chart" id="cInit"></div>')
+      + card('Initiation share','Who opens conversations · share of session openers (per bucket)','<div class="chart" id="cInit"></div>')
       + card('Question rate','Interrogatives per 100 messages','<div class="chart" id="cQ"></div>')
       + card('Message depth','Average words per TURN — a full thought, however many messages it was split into','<div class="chart" id="cDepth"></div>')
       + card('Monologue ↔ dialogue','Average messages per turn — how long each person talks before the other interjects','<div class="chart" id="cTurns"></div>')
       + card('Turn length distribution','How many messages a turn usually holds (all-time)','<div class="chart" id="cTurnHist"></div>')
       + '</div>')
   + section('Responsiveness',
-      card('Median in-session reply latency','Minutes · display capped near p95','<div class="chart" id="cLat"></div>'))
+      card('Median in-session reply latency','Minutes · per-bucket median-of-daily-medians (weighted by replies) · capped near p95','<div class="chart" id="cLat"></div>'))
   + section('Affect',
       '<div class="grid cols-2">'
       + card('Reactions given','Acknowledgement channel','<div class="chart" id="cReact"></div>')
@@ -445,7 +445,7 @@ function renderSkeleton(){
       + card('Activity clock · '+esc(A),'Messages by weekday × hour','<div class="chart" id="cHeatA"></div>')
       + card('Activity clock · '+esc(B),'Messages by weekday × hour','<div class="chart" id="cHeatB"></div>')
       + '</div>'
-      + card('Night share','Share of messages during 23:00–02:59','<div class="chart short" id="cNight"></div>'))
+      + card('Night share','Share of messages during 00:00–05:59','<div class="chart short" id="cNight"></div>'))
   + section('Endings & restarts',
       '<div class="grid cols-2">'
       + card('Final word share','Who is left unanswered when a conversation dies (per bucket)','<div class="chart" id="cEnd"></div>')
@@ -1106,12 +1106,26 @@ function renderKPIs(rt,hasData){
   var prevTotal=prev.A.msgs+prev.B.msgs;
   var prevPerDay=days>0?prevTotal/days:0;
 
-  var latA=tot.A.resp_lat_n?tot.A.resp_lat_sum_min/tot.A.resp_lat_n:null;
-  var latB=tot.B.resp_lat_n?tot.B.resp_lat_sum_min/tot.B.resp_lat_n:null;
-  var latAll=(tot.A.resp_lat_n+tot.B.resp_lat_n)>0?
-    (tot.A.resp_lat_sum_min+tot.B.resp_lat_sum_min)/(tot.A.resp_lat_n+tot.B.resp_lat_n):null;
-  var pLatAll=(prev.A.resp_lat_n+prev.B.resp_lat_n)>0?
-    (prev.A.resp_lat_sum_min+prev.B.resp_lat_sum_min)/(prev.A.resp_lat_n+prev.B.resp_lat_n):null;
+  // True range MEDIAN reply latency (median-of-daily-medians weighted by replies)
+  // so the KPI agrees with the "Median in-session reply latency" chart and the
+  // lifetime block instead of showing a tail-inflated mean (MONITORING_AUDIT §3.1).
+  function latMedians(startD,endD){
+    var A_=A,B_=B, pa=[],pb=[],pall=[], ents=dailyEntries();
+    for(var i=0;i<ents.length;i++){ var ds=ents[i][0];
+      var t=parseYMD(ds).getTime();
+      if(t<startD.getTime()||t>endD.getTime()) continue;
+      var c=ents[i][1];
+      if(c[A_]&&c[A_].resp_lat_n){ pa.push({p50:c[A_].resp_lat_p50_min,n:c[A_].resp_lat_n});
+        pall.push({p50:c[A_].resp_lat_p50_min,n:c[A_].resp_lat_n}); }
+      if(c[B_]&&c[B_].resp_lat_n){ pb.push({p50:c[B_].resp_lat_p50_min,n:c[B_].resp_lat_n});
+        pall.push({p50:c[B_].resp_lat_p50_min,n:c[B_].resp_lat_n}); }
+    }
+    return {A:weightedMedianOfMedians(pa),B:weightedMedianOfMedians(pb),
+            all:weightedMedianOfMedians(pall)};
+  }
+  var latCur=latMedians(state.start,state.end);
+  var latA=latCur.A, latB=latCur.B, latAll=latCur.all;
+  var pLatAll=latMedians(pw.start,pw.end).all;
 
   var initTot=tot.A.initiations+tot.B.initiations;
   var initA=initTot?tot.A.initiations/initTot:null;
@@ -1172,7 +1186,7 @@ function renderKPIs(rt,hasData){
   tiles.push(kpi('We-ness', weness==null?'—':fmtPct(weness),
      D(weness!=null&&pWeness!=null?weness-pWeness:null,{pp:true}),
      '<span class="split faint">we/us vs I/me talk</span>'));
-  tiles.push(kpi('Reply latency', fmtDur(latAll),
+  tiles.push(kpi('Median reply latency', fmtDur(latAll),
      D(relDelta(latAll,pLatAll),{invert:true}),
      '<span class="split"><span class="dotA"></span>'+fmtDur(latA)
      +' &nbsp;<span class="dotB"></span>'+fmtDur(latB)+'</span>'));
@@ -1186,7 +1200,7 @@ function renderKPIs(rt,hasData){
      +' &nbsp;<span class="dotB"></span>'+fmtNum(tot.B.reactions_given)+'</span>'));
   tiles.push(kpi('Night share', nightShare==null?'—':fmtPct(nightShare),
      D(nightShare!=null&&pNightShare!=null?nightShare-pNightShare:null,{pp:true}),
-     '<span class="split faint">23:00–02:59</span>'));
+     '<span class="split faint">00:00–05:59</span>'));
 
   el('kpiRow').innerHTML = hasData ? tiles.join('')
      : '<div class="kpi"><div class="placeholder">No data in range</div></div>';
@@ -1338,16 +1352,39 @@ function lineSeries(name,data,color){
     lineStyle:{width:2,color:color},itemStyle:{color:color},connectNulls:true};
 }
 
-/* ---- Responsiveness: median-ish reply latency (mean of in-session gaps) ---- */
+/* ---- Responsiveness: TRUE per-bucket median reply latency ----
+ * Each daily cell carries resp_lat_p50_min (that day's exact reply-latency
+ * median) and resp_lat_n (that day's reply count). A median cannot be summed, so
+ * per bucket we take the median-of-daily-medians weighted by each day's reply
+ * count — an honest per-bucket median, NOT the pooled mean the chart used to draw
+ * under a "Median" title (docs/MONITORING_AUDIT §3.1). */
+function weightedMedianOfMedians(pairs){
+  var xs=[]; for(var i=0;i<pairs.length;i++){ if(pairs[i].n>0) xs.push(pairs[i]); }
+  if(!xs.length) return null;
+  xs.sort(function(a,b){return a.p50-b.p50;});
+  var total=0,k; for(k=0;k<xs.length;k++) total+=xs[k].n;
+  var half=total/2, cum=0;
+  for(k=0;k<xs.length;k++){ cum+=xs[k].n; if(cum>=half) return xs[k].p50; }
+  return xs[xs.length-1].p50;
+}
 function renderResponsiveness(b){
   var A=state.users[0],B=state.users[1];
   if(!b.starts.length){ noData('cLat'); return; }
   ensureCanvas('cLat');
+  // Collect this bucket's per-day (median, n) pairs per user, aligned to b.starts.
+  var gran=b.gran, binA={}, binB={}, ents=dailyEntries();
+  for(var e=0;e<ents.length;e++){
+    var ds=ents[e][0]; if(!inRange(ds)) continue;
+    var bs=bucketStart(ds,gran), cells=ents[e][1];
+    if(!binA[bs]){ binA[bs]=[]; binB[bs]=[]; }
+    if(cells[A]&&cells[A].resp_lat_n) binA[bs].push({p50:cells[A].resp_lat_p50_min,n:cells[A].resp_lat_n});
+    if(cells[B]&&cells[B].resp_lat_n) binB[bs].push({p50:cells[B].resp_lat_p50_min,n:cells[B].resp_lat_n});
+  }
   var la=[],lb=[],allv=[];
   for(var i=0;i<b.starts.length;i++){
-    var ts=b.ts[i];
-    var va=b.rows[i].A.resp_lat_n?b.rows[i].A.resp_lat_sum_min/b.rows[i].A.resp_lat_n:null;
-    var vb=b.rows[i].B.resp_lat_n?b.rows[i].B.resp_lat_sum_min/b.rows[i].B.resp_lat_n:null;
+    var ts=b.ts[i], bs2=b.starts[i];
+    var va=weightedMedianOfMedians(binA[bs2]||[]);
+    var vb=weightedMedianOfMedians(binB[bs2]||[]);
     if(va!=null){la.push([ts,+va.toFixed(2)]);allv.push(va);} else la.push([ts,null]);
     if(vb!=null){lb.push([ts,+vb.toFixed(2)]);allv.push(vb);} else lb.push([ts,null]);
   }
@@ -1912,15 +1949,27 @@ function renderLifetime(){
   var num=function(v){return fmtNum(v);};
   var fw=lt.final_word_dominance||{};
   function fwv(u){return fw[u]==null?'—':pct(fw[u]);}
+  // All-time per-user totals from the daily table so the lifetime block uses the
+  // SAME definitions the charts/KPIs do: initiation = session-opener share, night
+  // = 00:00–05:59 share (docs/MONITORING_AUDIT §3.5/§4). This replaces the
+  // analysis.json sources (stricter re-open initiation; the old 23:00–02:59 night
+  // window), which diverged from what the rest of the page shows.
+  var ltTot={}; ltTot[A]=blank(); ltTot[B]=blank();
+  (function(){ var ents=dailyEntries();
+    for(var i=0;i<ents.length;i++){ var c=ents[i][1];
+      if(c[A]) addInto(ltTot[A],c[A]); if(c[B]) addInto(ltTot[B],c[B]); } })();
+  var initTotAll=ltTot[A].initiations+ltTot[B].initiations;
+  function ltInit(u){ return initTotAll?pct(ltTot[u].initiations/initTotAll):'—'; }
+  function ltNight(u){ return ltTot[u].msgs?pct(ltTot[u].night_msgs/ltTot[u].msgs):'—'; }
   var defs=[
     ['Final word %', function(u){return fwv(u);}],
-    ['Initiation share', function(u){return pu(lt.initiation,u,'initiation_share',pct);}],
+    ['Initiation share', function(u){return ltInit(u);}],
     ['Questions / 100 msgs', function(u){return pu(lt.question_asymmetry,u,'questions_per_100_msgs',num);}],
     ['Answered rate', function(u){return pu(lt.question_asymmetry,u,'answered_rate',pct1);}],
     ['Turning-toward (partner)', function(u){return pu(lt.bid_response,u,'partner_turned_toward_rate',pct1);}],
     ['Reactions given', function(u){return pu(lt.affect_economy,u,'reactions_given',num);}],
     ['Emoji / 100 msgs', function(u){return pu(lt.affect_economy,u,'emoji_per_100_msgs',num);}],
-    ['Night share', function(u){return pu(lt.circadian&&lt.circadian.per_user,u,'night_share',pct);}],
+    ['Night share', function(u){return ltNight(u);}],
     ['Repair share', function(u){return pu(lt.repair,u,'repair_share',pct);}],
     ['Double texts', function(u){return pu(lt.double_texting,u,'double_texts',num);}],
     ['Momentum-kill share', function(u){return pu(lt.half_life&&lt.half_life.per_user,u,'momentum_kill_share',pct1);}]
@@ -2423,7 +2472,7 @@ function renderSkeletonConnected(){
       + card('Attention hierarchy','Your mean reply latency per contact, fastest first · monthly sums pooled (means weighted by volume) · only contacts with ≥50 replies in range · 1:1 chats only','<div class="chart tall" id="cxLatL"></div>')
       + card('Initiation asymmetry — you start','Share of conversations YOU started with each contact (in range, volume-gated) · 1:1 chats only','<div class="chart tall" id="cxInitL"></div>')
       + card('Initiation asymmetry — they start toward you','Share of conversations THEY started (1 − your share) with each contact (in range, volume-gated) · 1:1 chats only','<div class="chart tall" id="cxInitRevL"></div>')
-      + card('Night ownership','Who receives your 00:00–06:00 messages · 👥 groups included (in range)','<div class="chart tall" id="cxNightL"></div>')
+      + card('Night ownership','Who receives your 00:00–05:59 messages · 👥 groups included (in range)','<div class="chart tall" id="cxNightL"></div>')
       + card('Openness','Your words per turn with each contact — where you talk in paragraphs vs monosyllables (in range, volume-gated) · 1:1 chats only','<div class="chart tall" id="cxOpenL"></div>')
       + card('You react fastest to','Mean time from their message to your reaction, fastest first · ≥30 reactions in range · 1:1 chats only','<div class="chart tall" id="cxReactYou"></div>')
       + card('Reacts to you fastest','Mean time from your message to their reaction, fastest first · ≥30 reactions in range · 1:1 chats only','<div class="chart tall" id="cxReactThem"></div>')
@@ -2549,7 +2598,7 @@ function renderConnKPIs(rt,has){
       '<span class="split faint">span overlaps range · '+fmtNum((c.totals||{}).contacts)+' total</span>'),
     kpi('Night messages',fmtNum(tot.night_msgs),
       D(relDelta(tot.night_msgs,prev.night_msgs)),
-      '<span class="split faint">00:00–06:00</span>')
+      '<span class="split faint">00:00–05:59</span>')
   ];
   el('kpiRow').innerHTML=has?tiles.join(''):'<div class="kpi"><div class="placeholder">No data in range</div></div>';
 }
@@ -2735,7 +2784,7 @@ function renderConnLeaderboards(){
     .sort(function(a,b){return b.v-a.v;});
   connHBar('cxInitL',init,function(v){return fmtPct(v);});
 
-  // Night ownership — share of your 00:00–06:00 messages (groups included, 👥).
+  // Night ownership — share of your 00:00–05:59 messages (groups included, 👥).
   var totNight=0; cids.forEach(function(cid){totNight+=agg[cid].night_sent||0;});
   var night=cids.filter(function(cid){return (agg[cid].night_sent||0)>0;})
     .map(function(cid){var a=agg[cid];
@@ -3416,7 +3465,7 @@ var CMP_METRICS=[
    fmt:function(v){return fmtNum(Math.round(v));}},
   {id:'cmpQ',title:'Question rate',sub:'Questions per message, each direction',pct:true,
    f:function(o,c){ return [o.msgs?o.questions/o.msgs:0, c.msgs?c.questions/c.msgs:0]; }},
-  {id:'cmpNight',title:'Night share',sub:'Share of messages 23:00–02:59, each direction',pct:true,
+  {id:'cmpNight',title:'Night share',sub:'Share of messages 00:00–05:59, each direction',pct:true,
    f:function(o,c){ return [o.msgs?o.night_msgs/o.msgs:0, c.msgs?c.night_msgs/c.msgs:0]; }},
   {id:'cmpLaugh',title:'Laugh share',sub:'Messages with laughter per message, each direction',pct:true,
    f:function(o,c){ return [o.msgs?o.laughs/o.msgs:0, c.msgs?c.laughs/c.msgs:0]; }},

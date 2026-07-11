@@ -22,6 +22,7 @@ All shared pipeline infrastructure is reused rather than re-derived:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from collections import Counter, defaultdict
@@ -146,7 +147,14 @@ def _blank_day() -> Dict[str, Any]:
         'night_msgs': 0, 'reactions_given': 0, 'reactions_received': 0,
         'media': 0, 'photos': 0, 'videos': 0, 'voice': 0, 'shares': 0,
         'hours': [0] * 24,
-        'resp_lat_sum_min': 0.0, 'resp_lat_n': 0, 'initiations': 0,
+        # resp_lat_sum_min/resp_lat_n = pooled sum + count of in-session reply
+        # gaps (a MEAN can be derived from these). resp_lat_p50_min = the TRUE
+        # median of this day's reply gaps, added so the "Median in-session reply
+        # latency" chart can honour its label instead of drawing a mean
+        # (docs/MONITORING_AUDIT §3.1). A median can't be reconstructed from
+        # sum/n, so the p50 is computed here from the raw per-reply latencies.
+        'resp_lat_sum_min': 0.0, 'resp_lat_n': 0, 'resp_lat_p50_min': 0.0,
+        'initiations': 0,
         # "turns": consecutive-message runs started this day. A turn ends when
         # the OTHER person interjects or a session gap passes. msgs/turns =
         # average monologue length; words/turns = words per complete thought.
@@ -256,6 +264,9 @@ def build_daily_aggregates(messages: List[Dict[str, Any]],
         return name
 
     daily: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(dict)
+    # Raw in-session reply gaps per (date, user), kept only long enough to take a
+    # true per-day median (resp_lat_p50_min); dropped before the payload ships.
+    lat_samples: Dict[Tuple[str, str], List[float]] = defaultdict(list)
 
     def cell(date: str, user: str) -> Dict[str, Any]:
         day = daily[date]
@@ -415,9 +426,12 @@ def build_daily_aggregates(messages: List[Dict[str, Any]],
                 continue
             replier = cur.get('sender_name', 'Unknown')
             if replier in user_set:
-                c = cell(_day(cur), replier)
-                c['resp_lat_sum_min'] += gap_ms / 60000.0
+                day = _day(cur)
+                c = cell(day, replier)
+                lat_min = gap_ms / 60000.0
+                c['resp_lat_sum_min'] += lat_min
                 c['resp_lat_n'] += 1
+                lat_samples[(day, replier)].append(lat_min)
 
     # --- Waiting eagerness (cross-session aware) ---------------------------- #
     # X sent a message, the partner's reply took >= 1h; how fast does X answer
@@ -440,13 +454,16 @@ def build_daily_aggregates(messages: List[Dict[str, Any]],
             c['wait_reply_sum_min'] += follow / 60000.0
             c['wait_reply_n'] += 1
 
-    # Round latency sums and freeze ordinary dicts.
+    # Round latency sums, stamp each cell's true per-day reply-latency median,
+    # and freeze ordinary dicts.
     out: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for date in sorted(daily):
         out[date] = {}
         for user, c in daily[date].items():
             c['resp_lat_sum_min'] = round(c['resp_lat_sum_min'], 2)
             c['wait_reply_sum_min'] = round(c['wait_reply_sum_min'], 2)
+            med = _median_num(lat_samples.get((date, user), []))
+            c['resp_lat_p50_min'] = round(med, 3) if med is not None else 0.0
             out[date][user] = c
     return out
 
@@ -1254,15 +1271,49 @@ def build_chat_payload(name: str,
 # Slugs + JS writers
 # --------------------------------------------------------------------------- #
 
+def _name_hash(name: str) -> str:
+    """Short, stable, order-independent disambiguator derived from the full name."""
+    return hashlib.sha1(name.encode('utf-8')).hexdigest()[:8]
+
+
 def slugify(name: str, taken: set) -> str:
-    """Filesystem- and JS-key-safe unique slug, byte-truncated for OS limits."""
+    """Filesystem- and JS-key-safe unique slug, byte-truncated for OS limits.
+
+    The slug is a DETERMINISTIC function of ``name`` alone — the same name always
+    yields the same id regardless of processing order or which other chats came
+    before it. This is what lets the per-chat and connected exporters agree on a
+    chat's id (docs/MONITORING_AUDIT §3.4): they share this one helper, so a chat
+    resolving to the same display name gets the same id in both payloads.
+
+    Disambiguation therefore uses a stable hash of the full name, never a running
+    counter:
+      * A name with NO ASCII-safe characters (e.g. a Georgian-only group title)
+        would otherwise collapse to the shared base ``chat`` and be numbered by
+        arrival order (``chat`` vs ``chat_2`` vs ``chat_8`` across exporters) —
+        instead it becomes ``chat-<hash>``, identical everywhere.
+      * Two distinct names that sanitise to the same ASCII base get ``base-<hash>``
+        so they never fight over the bare base.
+    The ``taken`` set is still honoured to guarantee true uniqueness within a
+    single build (astronomically-unlikely full-hash collisions only).
+    """
     base = re.sub(r'[^A-Za-z0-9._-]+', '_', name).strip('_.')
-    base = truncate_component(base or 'chat', max_bytes=48)
-    base = base or 'chat'
-    slug = base
+    base = truncate_component(base, max_bytes=48)
+    ascii_ok = bool(base)
+    if not ascii_ok:
+        base = 'chat'
+
+    if not ascii_ok:
+        # Non-ASCII-only name → never take the bare, order-dependent base.
+        slug = f'{base}-{_name_hash(name)}'
+    elif base in taken:
+        # ASCII base already claimed by a different name → hash-disambiguate.
+        slug = f'{base}-{_name_hash(name)}'
+    else:
+        slug = base
+
     i = 2
-    while slug in taken or not slug:
-        slug = f'{base}_{i}'
+    while slug in taken:
+        slug = f'{base}-{_name_hash(name)}-{i}'
         i += 1
     taken.add(slug)
     return slug
