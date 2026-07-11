@@ -171,6 +171,10 @@ def _blank_day() -> Dict[str, Any]:
         # Telegram-only: edited real messages this day (always 0 for Instagram,
         # whose messages never carry an edited_ms field).
         'edits': 0,
+        # Calls (platform-neutral; Telegram-rich, Instagram sparse). Attributed
+        # to the call's sender (= the call's actor/initiator on Telegram).
+        # answered = call_duration_s > 0; missed = a zero-duration / missed call.
+        'calls': 0, 'call_answered': 0, 'call_missed': 0, 'call_seconds': 0,
     }
 
 
@@ -186,6 +190,15 @@ def _media_count(msg: Dict[str, Any]) -> int:
     if msg.get('share'):
         n += 1
     return n
+
+
+def _is_call(msg: Dict[str, Any]) -> bool:
+    """A call event (phone/video). ``call_duration_s`` is written on both
+    platforms; ``type == 'call'`` and ``call_discard_reason`` are Telegram-side
+    fallbacks."""
+    return (msg.get('call_duration_s') is not None
+            or msg.get('type') == 'call'
+            or msg.get('call_discard_reason') is not None)
 
 
 # Pseudo-user that absorbs every sender outside the tracked top-N in a group.
@@ -305,6 +318,23 @@ def build_daily_aggregates(messages: List[Dict[str, Any]],
                     c[key] += 1
             if m.get('share'):
                 c['shares'] += 1
+
+    # --- Calls (ALL messages; attributed to the call's sender/initiator) ---- #
+    for m in messages:
+        if not _is_call(m):
+            continue
+        sender = canon(m.get('sender_name', 'Unknown'))
+        if sender not in user_set:
+            continue
+        date = to_datetime(m.get('timestamp_ms', 0), timezone).strftime('%Y-%m-%d')
+        c = cell(date, sender)
+        c['calls'] += 1
+        dur = m.get('call_duration_s') or 0
+        if dur > 0:
+            c['call_answered'] += 1
+            c['call_seconds'] += int(dur)
+        else:
+            c['call_missed'] += 1
 
     # --- Session-derived channels (initiations + reply latency) ------------ #
     real = [m for m in messages
@@ -873,6 +903,92 @@ def has_telegram_fields(messages: List[Dict[str, Any]]) -> bool:
     return False
 
 
+def _median_int(xs: List[int]) -> int:
+    m = _median_num([float(x) for x in xs])
+    return int(round(m)) if m is not None else 0
+
+
+def build_call_stats(messages: List[Dict[str, Any]],
+                     participants: List[str]) -> Optional[Dict[str, Any]]:
+    """Per-chat call block. Returns ``None`` when the chat has no call events.
+
+    Platform-neutral: any chat carrying ``call_duration_s`` / ``type == 'call'``
+    gets a block (Telegram is call-rich; Instagram is sparse but included by
+    owner order). Each call is attributed to its sender — on Telegram that is the
+    call's *actor*, i.e. the initiator. Per DATA_AUDIT §4 P2 the ``actor``
+    credits the call event, NOT necessarily who ended it, so ``discard_reason``
+    is surfaced as an outcome mix (``outcomes``) and ``attribution`` is flagged
+    ``initiator`` so the UI frames "who ends the call" as a call-outcome share,
+    not a literal claim about who pressed end.
+    """
+    user_set = set(participants)
+    per_user: Dict[str, Dict[str, Any]] = {
+        u: {'calls': 0, 'answered': 0, 'missed': 0, 'total_s': 0, '_durs': []}
+        for u in participants}
+    outcomes: Counter = Counter()
+    answered_durs: List[int] = []
+    total = 0
+    for m in messages:
+        if not _is_call(m):
+            continue
+        total += 1
+        reason = m.get('call_discard_reason')
+        if reason:
+            outcomes[str(reason)] += 1
+        dur = int(m.get('call_duration_s') or 0)
+        answered = dur > 0
+        if answered:
+            answered_durs.append(dur)
+        sender = decode_georgian_text(m.get('sender_name', '') or '')
+        if sender in user_set:
+            pu = per_user[sender]
+            pu['calls'] += 1
+            if answered:
+                pu['answered'] += 1
+                pu['total_s'] += dur
+                pu['_durs'].append(dur)
+            else:
+                pu['missed'] += 1
+    if total == 0:
+        return None
+    per_user_out = {
+        u: {'calls': pu['calls'], 'answered': pu['answered'],
+            'missed': pu['missed'], 'total_s': pu['total_s'],
+            'median_s': _median_int(pu['_durs'])}
+        for u, pu in per_user.items()}
+    return {
+        'per_user': per_user_out,
+        'total_calls': total,
+        'answered': len(answered_durs),
+        'missed': total - len(answered_durs),
+        'total_talk_s': sum(answered_durs),
+        'median_talk_s': _median_int(answered_durs),
+        'outcomes': dict(outcomes),
+        'attribution': 'initiator',
+    }
+
+
+# Reaction-latency and edit-latency bucket edges (seconds), longest-first labels.
+def _reaction_bucket(sec: float) -> str:
+    if sec < 60: return '<1m'
+    if sec < 600: return '1-10m'
+    if sec < 3600: return '10-60m'
+    if sec < 86400: return '1-24h'
+    return '>1d'
+
+
+def _edit_bucket(sec: float) -> str:
+    if sec < 60: return '<1m'
+    if sec < 600: return '1-10m'
+    if sec < 3600: return '10-60m'
+    return '>1h'
+
+
+# reaction latencies above this (7 days) are treated as noise, not "left on
+# reacted" timing (DATA_AUDIT §4 P3).
+_REACT_LAT_CAP_MS = 7 * 24 * 60 * 60 * 1000
+
+
 def build_telegram_signals(messages: List[Dict[str, Any]],
                            participants: List[str]) -> Dict[str, Any]:
     """Telegram-exclusive per-user signals (gated on field presence).
@@ -943,7 +1059,109 @@ def build_telegram_signals(messages: List[Dict[str, Any]],
             'mentions': s['mentions'],
         }
 
-    return {'per_user': per_user, 'reply_depth': dict(depth_hist)}
+    # ---- P1 voice notes: count + median/total playback length -------------- #
+    voice_durs: Dict[str, List[int]] = {u: [] for u in participants}
+    for m in messages:
+        dur = m.get('media_duration_s')
+        if dur is None:
+            continue
+        sender = decode_georgian_text(m.get('sender_name', '') or '')
+        if sender in user_set:
+            voice_durs[sender].append(int(dur))
+    voice_notes = {u: {'n': len(v), 'median_s': _median_int(v), 'total_s': sum(v)}
+                   for u, v in voice_durs.items()}
+
+    # ---- P4 stickers: per-user vocabulary + overlap coefficient ------------ #
+    sticker_ct: Dict[str, Counter] = {u: Counter() for u in participants}
+    for m in messages:
+        st = m.get('sticker')
+        if not isinstance(st, dict):
+            continue
+        emoji = st.get('emoji') or ''
+        sender = decode_georgian_text(m.get('sender_name', '') or '')
+        if sender in user_set:
+            sticker_ct[sender][emoji] += 1
+    sticker_total = sum(sum(c.values()) for c in sticker_ct.values())
+    stickers_pu = {u: {'n': int(sum(c.values())),
+                       'top': [[e, n] for e, n in c.most_common(8) if e]}
+                   for u, c in sticker_ct.items()}
+    overlap = None
+    shared: List[str] = []
+    if len(participants) == 2:
+        sa = {e for e in sticker_ct[participants[0]] if e}
+        sb = {e for e in sticker_ct[participants[1]] if e}
+        if sa and sb:
+            inter = sa & sb
+            overlap = round(len(inter) / min(len(sa), len(sb)), 4)
+            shared = sorted(
+                inter, key=lambda e: -(sticker_ct[participants[0]][e]
+                                       + sticker_ct[participants[1]][e]))[:10]
+    stickers = {'per_user': stickers_pu, 'total': sticker_total,
+                'overlap': overlap, 'shared': shared}
+
+    # ---- P3 reaction latency + P5 signature emoji -------------------------- #
+    # reactor = the reaction's actor; latency = reaction date − message ts.
+    react_lat: Dict[str, List[float]] = {u: [] for u in participants}
+    react_buckets: Dict[str, Counter] = {u: Counter() for u in participants}
+    sig_emoji: Dict[str, Counter] = {u: Counter() for u in participants}
+    for m in messages:
+        msg_ts = m.get('timestamp_ms', 0)
+        for r in (m.get('reactions') or []):
+            actor = decode_georgian_text(r.get('actor', '') or '')
+            if actor not in user_set:
+                continue
+            emoji = r.get('reaction') or ''
+            if emoji:
+                sig_emoji[actor][emoji] += 1
+            rdate = r.get('date')
+            if rdate is None or not msg_ts:
+                continue
+            gap = rdate - msg_ts
+            if gap < 0 or gap > _REACT_LAT_CAP_MS:
+                continue
+            sec = gap / 1000.0
+            react_lat[actor].append(sec)
+            react_buckets[actor][_reaction_bucket(sec)] += 1
+    reaction_latency = {
+        u: {'n': len(react_lat[u]),
+            'median_s': _median_int([int(x) for x in react_lat[u]]),
+            'buckets': dict(react_buckets[u])}
+        for u in participants}
+    signature_emoji = {}
+    for u in participants:
+        c = sig_emoji[u]
+        tot = sum(c.values())
+        top = c.most_common(6)
+        signature_emoji[u] = {
+            'n': tot,
+            'top': [[e, n] for e, n in top],
+            'concentration': round(top[0][1] / tot, 4) if tot and top else 0.0,
+        }
+
+    # ---- P6 edit latency: distribution buckets per person ------------------ #
+    edit_buckets: Dict[str, Counter] = {u: Counter() for u in participants}
+    edit_lat: Dict[str, List[int]] = {u: [] for u in participants}
+    for m in real:
+        ed = m.get('edited_ms')
+        ts = m.get('timestamp_ms', 0)
+        if not ed or not ts:
+            continue
+        gap = ed - ts
+        if gap < 0:
+            continue
+        sec = gap / 1000.0
+        u = m['sender_name']
+        edit_buckets[u][_edit_bucket(sec)] += 1
+        edit_lat[u].append(int(sec))
+    edit_latency = {
+        u: {'n': len(edit_lat[u]), 'median_s': _median_int(edit_lat[u]),
+            'buckets': dict(edit_buckets[u])}
+        for u in participants}
+
+    return {'per_user': per_user, 'reply_depth': dict(depth_hist),
+            'voice_notes': voice_notes, 'stickers': stickers,
+            'reaction_latency': reaction_latency,
+            'signature_emoji': signature_emoji, 'edit_latency': edit_latency}
 
 
 # --------------------------------------------------------------------------- #
@@ -1006,6 +1224,9 @@ def build_chat_payload(name: str,
         }
         if has_telegram_fields(messages):
             group_payload['telegram'] = build_telegram_signals(messages, participants)
+        calls = build_call_stats(messages, participants)
+        if calls:
+            group_payload['calls'] = calls
         return group_payload
 
     participants = choose_participants(messages, fallback)
@@ -1023,6 +1244,9 @@ def build_chat_payload(name: str,
     }
     if has_telegram_fields(messages):
         payload['telegram'] = build_telegram_signals(messages, participants)
+    calls = build_call_stats(messages, participants)
+    if calls:
+        payload['calls'] = calls
     return payload
 
 

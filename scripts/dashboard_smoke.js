@@ -281,6 +281,58 @@ try {
     console.log('no telegram chats in manifest — telegram mode / platform filter not exercised');
   }
 
+  // --- M3.1 capture-layer cards (calls, voice, reactions, stickers, edits).
+  //     Gate invariant (must hold for EVERY chat): the Calls section renders iff
+  //     the chat has a `calls` block; the Telegram-signals section (which now
+  //     hosts the voice/reaction/signature/edit-latency/sticker cards) renders
+  //     iff the chat carries a `telegram` block. Instagram-only chats therefore
+  //     show none of these UNLESS they have call events.
+  g("selectedPlatforms=null; buildPlatformFilter();");
+  const gateOK = () => {
+    const hasTg = g('!!(state.chat&&state.chat.telegram)');
+    const hasCalls = g('!!(state.chat&&state.chat.calls)');
+    const tgSec = g('telegramSection()') !== '';
+    const callSec = g('callsSection()') !== '';
+    return { hasTg, hasCalls, tgSec, callSec, ok: (tgSec === hasTg) && (callSec === hasCalls) };
+  };
+  if (tid) {
+    g(`selectChat(${JSON.stringify(tid)})`); g("applyPreset('all')"); flush();
+    const sec = g('telegramSection()');
+    const newTgCards = ['cTgVoice', 'cTgReactLat', 'tgSigBox', 'cTgEditLat', 'tgStickerBox'];
+    const cardsPresent = newTgCards.every(id => sec.includes(id));
+    const gt = gateOK();
+    // charts freshly set for the current chat -> present in the registry
+    const drawn = ['cTgVoice', 'cTgReactLat', 'cTgEditLat'].filter(id => !!g(`charts[${JSON.stringify(id)}]`)).length;
+    console.log('telegram new cards | id:', tid, '| tgCardsInSkeleton:', cardsPresent,
+      '| tgChartsDrawn:', drawn + '/3', '| gateInvariant:', gt.ok,
+      '| callsSection:', gt.callSec, '(hasCalls ' + gt.hasCalls + ')');
+    if (!cardsPresent) throw new Error('telegram chat is missing the new signal cards');
+    if (drawn < 3) throw new Error('telegram new charts did not render');
+    if (!gt.ok) throw new Error('gate invariant failed on telegram chat');
+    if (gt.hasCalls) {
+      if (!g('callsSection()').includes('cCallsTime')) throw new Error('calls section missing cCallsTime');
+      if (!g('charts["cCallsTime"]')) throw new Error('cCallsTime chart did not render');
+    }
+  }
+  // Find a plain Instagram dyad with NO calls and NO telegram; assert it shows
+  // none of the new sections (the negative half of the gate).
+  const igDyads = g("DASHBOARD_MANIFEST.filter(function(m){return (m.platform||'instagram')==='instagram'&&!m.is_group;}).map(function(m){return m.id;})");
+  let plainChecked = false;
+  for (let i = 0; i < igDyads.length && i < 12; i++) {
+    g(`selectChat(${JSON.stringify(igDyads[i])})`); flush();
+    const gt = gateOK();
+    if (!gt.ok) throw new Error('gate invariant failed on instagram chat ' + igDyads[i]);
+    if (!gt.hasCalls && !gt.hasTg) {
+      console.log('instagram gate | id:', igDyads[i], '| telegramSection:', gt.tgSec,
+        '| callsSection:', gt.callSec, '(both should be false)');
+      if (gt.tgSec || gt.callSec) throw new Error('plain instagram chat rendered capture-layer cards');
+      plainChecked = true;
+      break;
+    }
+  }
+  if (!plainChecked) console.log('no plain instagram dyad (all have calls/telegram) — negative gate not exercised');
+  g(`selectChat(${JSON.stringify(first)})`); flush();
+
   // Connected (owner) mode — pinned "You — Connected" entry.
   // Ensure platform filter is at ALL so the default connected variant is 'all'.
   g("selectedPlatforms=null; buildPlatformFilter();");
@@ -293,6 +345,16 @@ try {
   if (g('state.connectedVariant') !== 'all') throw new Error('default connected variant should be all');
   g("applyPreset('90')");
   console.log('connected preset OK | setOptions:', g('window.__setOptions'));
+
+  // --- M3.1: reaction-latency leaderboards (both directions) in Contact
+  //     leaderboards. Charts render whenever ≥1 contact clears the ≥30 gate.
+  g("applyPreset('all')"); flush();
+  const lbAll = g('(state.connected&&state.connected.leaderboards)||{}');
+  const nYou = g('((state.connected&&state.connected.leaderboards&&state.connected.leaderboards.react_latency_you)||[]).length');
+  const nThem = g('((state.connected&&state.connected.leaderboards&&state.connected.leaderboards.react_latency_them)||[]).length');
+  const reactCharts = ['cxReactYou', 'cxReactThem'].filter(id => !!g(`charts[${JSON.stringify(id)}]`)).length;
+  console.log('connected reaction-latency | youBoard:', nYou, '| themBoard:', nThem, '| chartsDrawn:', reactCharts + '/2');
+  if ((nYou > 0 || nThem > 0) && reactCharts < 2) throw new Error('reaction-latency leaderboard charts did not render');
 
   // --- Findings: Connected view renders strips under its charts (or, when a
   //     finding is unanchored, in the Other-findings box).

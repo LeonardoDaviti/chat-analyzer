@@ -141,6 +141,7 @@ class ChatCtx:
         self.lifetime = payload.get('lifetime', {}) or {}
         self.extras = payload.get('extras', {}) or {}
         self.telegram = payload.get('telegram')
+        self.calls = payload.get('calls')
         self.change_points = payload.get('change_points', []) or []
 
         daily: Dict[str, Dict[str, Any]] = payload.get('daily', {}) or {}
@@ -970,6 +971,193 @@ def rule_repair(c: ChatCtx) -> Optional[Dict]:
     return None
 
 
+# --------------------------------------------------------------------------- #
+# M3.1 — capture-layer rules (calls, voice, reactions, edits, stickers).
+# All-time; read the telegram / calls payload blocks, never the daily table.
+# --------------------------------------------------------------------------- #
+
+def _fmt_hms(seconds: float) -> str:
+    s = int(seconds)
+    if s < 60:
+        return f'{s}s'
+    if s < 3600:
+        return f'{s // 60}m'
+    h, m = s // 3600, (s % 3600) // 60
+    return f'{h}h' + (f' {m}m' if m else '')
+
+
+def rule_call_habit(c: ChatCtx) -> Optional[Dict]:
+    """A heavy-call dyad — real time spent on calls, not just texting."""
+    cl = c.calls
+    if not cl:
+        return None
+    total = cl.get('total_calls', 0)
+    answered = cl.get('answered', 0)
+    talk_s = cl.get('total_talk_s', 0)
+    if total < 30 or answered < 10 or talk_s < 3600:
+        return None
+    hours = talk_s / 3600.0
+    effect = min(hours / 5.0, 1.0)   # 5h of talk time saturates
+    sc, E, V, conf = _score(CATEGORY_WEIGHTS['dynamics'], effect, 1.0,
+                            total, 30)
+    med = cl.get('median_talk_s', 0)
+    sent = (f"You and {_name(c.partner, c.owner)} actually call: {total} calls, "
+            f"{_fmt_hms(talk_s)} of talk time in total (median answered call "
+            f"{_fmt_hms(med)}). This isn't a text-only relationship.")
+    return _finding('call-habit', 'chat', 'dynamics', 'notable', 'record',
+                    'You two get on the phone', sent,
+                    {'total_calls': total, 'answered': answered,
+                     'missed': cl.get('missed', 0), 'talk_hours': round(hours, 1),
+                     'median_call_s': med},
+                    sc, conf, c.window, anchor='cCallsTime', chat_id=c.chat_id)
+
+
+def rule_voice_note_asymmetry(c: ChatCtx) -> Optional[Dict]:
+    """One side talks (voice notes), the other types."""
+    if not c.telegram:
+        return None
+    vn = c.telegram.get('voice_notes', {}) or {}
+    a, b = c.participants
+    na = (vn.get(a, {}) or {}).get('n', 0)
+    nb = (vn.get(b, {}) or {}).get('n', 0)
+    if na + nb < 40:
+        return None
+    for X, Y, nx, ny in ((a, b, na, nb), (b, a, nb, na)):
+        if nx < 30 or ny <= 0 or nx < 2 * ny:
+            continue
+        ratio = nx / ny
+        med = (vn.get(X, {}) or {}).get('median_s', 0)
+        sc, E, V, conf = _score(CATEGORY_WEIGHTS['rhythm'], ratio, 3.0,
+                                na + nb, 40)
+        sent = (f"{_Name(X, c.owner)} send{'' if X==c.owner else 's'} the voice notes — "
+                f"{nx} vs {ny} (median {_fmt_hms(med)} each) — while "
+                f"{_name(Y, c.owner)} mostly type{'' if Y==c.owner else 's'}. "
+                f"One of you talks, one of you pings.")
+        return _finding('voice-note-asymmetry', 'chat', 'rhythm', 'notable', 'asym',
+                        'One talks, one types', sent,
+                        {'sender': X, 'voice_notes': nx, 'partner_voice_notes': ny,
+                         'ratio': round(ratio, 2), 'median_s': med},
+                        sc, conf, c.window, anchor='cTgVoice', chat_id=c.chat_id)
+    return None
+
+
+def rule_fast_reactor(c: ChatCtx) -> Optional[Dict]:
+    """Reaction-latency asymmetry — one person is always watching."""
+    if not c.telegram:
+        return None
+    rl = c.telegram.get('reaction_latency', {}) or {}
+    a, b = c.participants
+    ra, rb = rl.get(a, {}) or {}, rl.get(b, {}) or {}
+    na, nb = ra.get('n', 0), rb.get('n', 0)
+    ma, mb = ra.get('median_s', 0), rb.get('median_s', 0)
+    if na < 50 or nb < 50 or ma <= 0 or mb <= 0:
+        return None
+    for X, Y, mx, my in ((a, b, ma, mb), (b, a, mb, ma)):
+        if mx * 2 <= my:   # X reacts at least 2x faster than Y
+            ratio = my / mx
+            sc, E, V, conf = _score(CATEGORY_WEIGHTS['attention'], ratio, 3.0,
+                                    min(na, nb), 50)
+            sent = (f"{_Name(X, c.owner)} react{'' if X==c.owner else 's'} in a median "
+                    f"{_fmt_hms(mx)}; {_name(Y, c.owner)} take{'' if Y==c.owner else 's'} "
+                    f"{_fmt_hms(my)}. {_Name(X, c.owner)}"
+                    f"{' are' if X==c.owner else ' is'} the one watching the chat.")
+            return _finding('fast-reactor', 'chat', 'attention', 'notable', 'asym',
+                            'One of you is always watching', sent,
+                            {'faster': X, 'median_s': mx, 'partner_median_s': my,
+                             'ratio': round(ratio, 2)},
+                            sc, conf, c.window, anchor='cTgReactLat', chat_id=c.chat_id)
+    return None
+
+
+def rule_signature_emoji(c: ChatCtx) -> Optional[Dict]:
+    """Fun: one person's reactions are basically a single signature emoji."""
+    if not c.telegram:
+        return None
+    se = c.telegram.get('signature_emoji', {}) or {}
+    best = None
+    for u in c.participants:
+        o = se.get(u, {}) or {}
+        if o.get('n', 0) >= 100 and o.get('concentration', 0) >= 0.5 and o.get('top'):
+            if best is None or o['concentration'] > best[1].get('concentration', 0):
+                best = (u, o)
+    if not best:
+        return None
+    u, o = best
+    emoji, cnt = o['top'][0][0], o['top'][0][1]
+    conc = o['concentration']
+    sc, E, V, conf = _score(CATEGORY_WEIGHTS['fun'], conc, 1.0, o['n'], 100)
+    sent = (f"{_poss(u, c.owner).capitalize()} reactions are basically one emoji: "
+            f"{emoji} is {_pct(conc)} of everything {_name(u, c.owner)} "
+            f"react{'' if u!=c.owner else ''}s with ({cnt} times).")
+    return _finding('signature-emoji', 'chat', 'rhythm', 'fun', 'record',
+                    'A signature reaction', sent,
+                    {'person': u, 'emoji': emoji, 'concentration': round(conc, 3),
+                     'count': cnt, 'reactions': o['n']},
+                    sc, conf, c.window, anchor='tgSigBox', chat_id=c.chat_id)
+
+
+def rule_edit_reconsideration(c: ChatCtx) -> Optional[Dict]:
+    """Additive to tg-second-guessing: edits that land >1h later = rereading,
+    not typo-fixing."""
+    if not c.telegram:
+        return None
+    el = c.telegram.get('edit_latency', {}) or {}
+    best = None
+    for u in c.participants:
+        o = el.get(u, {}) or {}
+        n = o.get('n', 0)
+        if n < 200:
+            continue
+        late = (o.get('buckets', {}) or {}).get('>1h', 0)
+        share = late / n if n else 0
+        if share >= 0.10 and (best is None or share > best[2]):
+            best = (u, o, share, late, n)
+    if not best:
+        return None
+    u, o, share, late, n = best
+    sc, E, V, conf = _score(CATEGORY_WEIGHTS['language'], share, 0.25, n, 200)
+    sent = (f"{_pct(share)} of {_poss(u, c.owner)} edits land more than an hour after "
+            f"sending ({late} of {n}) — long past a typo fix. "
+            f"{_Name(u, c.owner)}{' keep' if u==c.owner else ' keeps'} rereading.")
+    return _finding('edit-reconsideration', 'chat', 'language', 'notable', 'up',
+                    'Editing long after the moment', sent,
+                    {'person': u, 'late_share': round(share, 3),
+                     'late_edits': late, 'edits': n},
+                    sc, conf, c.window, anchor='cTgEditLat', chat_id=c.chat_id)
+
+
+def rule_sticker_vocabulary(c: ChatCtx) -> Optional[Dict]:
+    """Fun: the two sticker vocabularies overlap heavily (shared language) or
+    barely at all (separate worlds). Gated on >=100 stickers total."""
+    if not c.telegram:
+        return None
+    st = c.telegram.get('stickers', {}) or {}
+    total = st.get('total', 0)
+    overlap = st.get('overlap')
+    if total < 100 or overlap is None:
+        return None
+    if overlap >= 0.6:
+        shared = st.get('shared', []) or []
+        share_str = ' '.join(shared[:6])
+        effect = min(overlap, 1.0)
+        sent = (f"You two speak the same sticker language: {_pct(overlap)} of the "
+                f"smaller vocabulary is shared"
+                + (f" ({share_str})" if share_str else '') + ". A private dialect.")
+        direction, title = 'up', 'A shared sticker language'
+    elif overlap <= 0.15:
+        effect = min((0.15 - overlap) / 0.15 + 0.5, 1.0)
+        sent = (f"Your sticker worlds barely touch: only {_pct(overlap)} of the smaller "
+                f"vocabulary overlaps — you each have your own set.")
+        direction, title = 'down', 'Separate sticker worlds'
+    else:
+        return None
+    sc, E, V, conf = _score(CATEGORY_WEIGHTS['fun'], effect, 1.0, total, 100)
+    return _finding('sticker-vocabulary', 'chat', 'rhythm', 'fun', direction,
+                    title, sent,
+                    {'overlap': round(overlap, 3), 'stickers_total': total},
+                    sc, conf, c.window, anchor='tgStickerBox', chat_id=c.chat_id)
+
+
 CHAT_RULES: Dict[str, Callable[[ChatCtx], Optional[Dict]]] = {
     'asymmetric-pursuit': rule_asymmetric_pursuit,
     'pursuit-withdrawal-trend': rule_pursuit_withdrawal_trend,
@@ -998,6 +1186,13 @@ CHAT_RULES: Dict[str, Callable[[ChatCtx], Optional[Dict]]] = {
     'length-mirroring': rule_length_mirroring,
     'openings-that-land': rule_openings_that_land,
     'rupture-repair': rule_repair,   # emits id quick-repair OR slow-repair
+    # M3.1 capture-layer rules
+    'call-habit': rule_call_habit,
+    'voice-note-asymmetry': rule_voice_note_asymmetry,
+    'fast-reactor': rule_fast_reactor,
+    'signature-emoji': rule_signature_emoji,
+    'edit-reconsideration': rule_edit_reconsideration,
+    'sticker-vocabulary': rule_sticker_vocabulary,
 }
 
 # Rules whose inputs live entirely in the per-day daily table, so the browser

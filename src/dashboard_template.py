@@ -324,7 +324,7 @@ function blank(){return {msgs:0,words:0,chars:0,emoji:0,questions:0,
   turns:0,turns_answered:0,endings:0,self_restarts:0,reacted_leave:0,
   wait_reply_sum_min:0,wait_reply_n:0,resp_lat_sum_min:0,resp_lat_n:0,initiations:0,
   we_words:0,i_words:0,you_words:0,pos_words:0,neg_words:0,gratitude:0,apology:0,
-  edits:0};}
+  edits:0,calls:0,call_answered:0,call_missed:0,call_seconds:0};}
 function addInto(acc,cell){
   for(var k in acc){ if(cell[k]!=null) acc[k]+=cell[k]; }
 }
@@ -463,6 +463,7 @@ function renderSkeleton(){
   + section('Language',
       '<div class="grid cols-2" id="nlpCards"></div>')
   + telegramSection()
+  + callsSection()
   + section('Shifts vs previous period',
       card('What changed','Every metric that moved, current range compared to the previous window of equal length',
         '<div class="diff" id="shiftList"></div>'))
@@ -481,6 +482,22 @@ function telegramSection(){
     + card('Reply depth','How deep reply chains go (count of replies at each chain depth)','<div class="chart" id="cTgDepth"></div>')
     + card('Forward share','Share of messages that are forwards (all-time)','<div class="chart" id="cTgForward"></div>')
     + card('Entity mix','Links, hashtags and mentions used per person (all-time)','<div class="chart" id="cTgEntities"></div>')
+    + card('Voice notes','How many voice notes each person sends and how long they run (all-time)','<div class="chart" id="cTgVoice"></div>')
+    + card('Reaction speed','Median time from a message to each person’s reaction — how fast they’re watching (all-time)','<div class="chart" id="cTgReactLat"></div>')
+    + card('Signature reactions','Each person’s most-used reaction emoji and how concentrated it is (all-time)','<div id="tgSigBox" style="min-height:120px"></div>')
+    + card('Edit latency','When edits happen after sending — quick typo fixes vs later reconsideration (all-time)','<div class="chart" id="cTgEditLat"></div>')
+    + card('Stickers','Sticker use per person, top stickers and how much the two vocabularies overlap (all-time)','<div id="tgStickerBox" style="min-height:120px"></div>')
+    + '</div>');
+}
+/* Calls — platform-neutral; rendered whenever the chat carries any call events
+   (Telegram is call-rich, Instagram sparse). */
+function callsSection(){
+  if(!state.chat||!state.chat.calls) return '';
+  return section('Calls',
+    '<div class="grid cols-2">'
+    + card('Calls over time','Calls in range, split by who started the call','<div class="chart" id="cCallsTime"></div>')
+    + card('Answered vs missed','Answered = the call connected (talk time > 0) · in range','<div class="chart" id="cCallsMix"></div><div id="callsBox" style="min-height:60px;margin-top:8px"></div>')
+    + card('Call outcomes','How calls ended · the call is credited to its initiator, so this is the outcome mix, not who literally hung up (all-time)','<div class="chart" id="cCallsOutcome"></div>')
     + '</div>');
 }
 function renderTelegram(rt){
@@ -528,6 +545,118 @@ function renderTelegram(rt){
         data:[pa.links||0,pa.hashtags||0,pa.mentions||0]},
       {name:B,type:'bar',itemStyle:{color:COLORS.b},
         data:[pb.links||0,pb.hashtags||0,pb.mentions||0]}]});
+  // ---- Voice notes: count + median duration (all-time) ---- #
+  var vn=tg.voice_notes||{}, va=vn[A]||{}, vb=vn[B]||{};
+  if((va.n||0)+(vb.n||0)>0){
+    setChart('cTgVoice',{grid:baseGrid(),legend:legend(['count','median length']),
+      tooltip:{trigger:'axis',backgroundColor:PANEL,borderColor:GRID,textStyle:{color:TEXT},
+        formatter:function(ps){var s=esc(ps[0].axisValue)+'<br>';
+          s+=markDot(COLORS.a)+'count: <b>'+fmtNum(ps[0].value)+'</b><br>';
+          if(ps[1])s+=markDot(COLORS.b)+'median: <b>'+fmtDur((ps[1].value||0)/60)+'</b>';return s;}},
+      xAxis:{type:'category',data:names,axisLine:{lineStyle:{color:GRID}},axisLabel:{color:MUTED}},
+      yAxis:[valAxis({name:'count',nameTextStyle:{color:MUTED}}),
+        valAxis({name:'sec',nameTextStyle:{color:MUTED},position:'right',axisLabel:{color:MUTED}})],
+      series:[{name:'count',type:'bar',yAxisIndex:0,barMaxWidth:50,
+        data:[va.n||0,vb.n||0],itemStyle:{color:COLORS.a}},
+        {name:'median length',type:'bar',yAxisIndex:1,barMaxWidth:50,
+          data:[va.median_s||0,vb.median_s||0],itemStyle:{color:COLORS.b}}]});
+  } else noData('cTgVoice');
+  // ---- Reaction latency: median seconds per person (all-time) ---- #
+  var rl=tg.reaction_latency||{}, ra=rl[A]||{}, rb=rl[B]||{};
+  if((ra.n||0)+(rb.n||0)>0){
+    setChart('cTgReactLat',{grid:baseGrid(),
+      tooltip:{trigger:'axis',backgroundColor:PANEL,borderColor:GRID,textStyle:{color:TEXT},
+        formatter:function(ps){var i=ps[0].dataIndex;var o=i===0?ra:rb;
+          return esc(names[i])+'<br>median: <b>'+fmtDur((o.median_s||0)/60)+'</b><br>'+fmtNum(o.n||0)+' reactions';}},
+      xAxis:{type:'category',data:names,axisLine:{lineStyle:{color:GRID}},axisLabel:{color:MUTED}},
+      yAxis:valAxis({name:'sec',nameTextStyle:{color:MUTED}}),
+      series:[{type:'bar',barMaxWidth:60,
+        data:[{value:ra.median_s||0,itemStyle:{color:COLORS.a}},
+              {value:rb.median_s||0,itemStyle:{color:COLORS.b}}],
+        label:{show:true,position:'top',color:TEXT,formatter:function(o){return fmtDur((o.value||0)/60);}}}]});
+  } else noData('cTgReactLat');
+  // ---- Signature reactions: top emoji + concentration ---- #
+  var se=tg.signature_emoji||{}, seA=se[A]||{}, seB=se[B]||{};
+  (function(){
+    function line(u,o){
+      var top=(o.top||[]);
+      if(!top.length) return '<div class="nlp-label">'+esc(u)+'</div><div class="vocab-line faint">no reactions</div>';
+      var tags=top.slice(0,6).map(function(t){return '<span class="tag">'+esc(t[0])+'<span class="n">'+fmtNum(t[1])+'</span></span>';}).join('');
+      return '<div class="nlp-label">'+esc(u)+' · top '+esc(top[0][0])+' is '+fmtPct(o.concentration||0,0)+' of reactions</div>'+tags;
+    }
+    var box=el('tgSigBox'); if(box) box.innerHTML=line(A,seA)+line(B,seB);
+  })();
+  // ---- Edit latency buckets per person ---- #
+  var elt=tg.edit_latency||{}, elA=elt[A]||{}, elB=elt[B]||{};
+  if((elA.n||0)+(elB.n||0)>0){
+    var eord=['<1m','1-10m','10-60m','>1h'];
+    setChart('cTgEditLat',{grid:baseGrid(),legend:legend(names),
+      tooltip:{trigger:'axis',backgroundColor:PANEL,borderColor:GRID,textStyle:{color:TEXT}},
+      xAxis:{type:'category',data:eord,axisLine:{lineStyle:{color:GRID}},axisLabel:{color:MUTED}},
+      yAxis:valAxis({}),
+      series:[{name:A,type:'bar',itemStyle:{color:COLORS.a},
+        data:eord.map(function(k){return (elA.buckets||{})[k]||0;})},
+        {name:B,type:'bar',itemStyle:{color:COLORS.b},
+          data:eord.map(function(k){return (elB.buckets||{})[k]||0;})}]});
+  } else noData('cTgEditLat');
+  // ---- Stickers: counts, top, overlap ---- #
+  var st=tg.stickers||{}, spu=st.per_user||{}, stA=spu[A]||{}, stB=spu[B]||{};
+  (function(){
+    function line(u,o){
+      var top=(o.top||[]);
+      var tags=top.slice(0,8).map(function(t){return '<span class="tag">'+esc(t[0])+'<span class="n">'+fmtNum(t[1])+'</span></span>';}).join('');
+      return '<div class="nlp-label">'+esc(u)+' · '+fmtNum(o.n||0)+' stickers</div>'+(tags||'<div class="vocab-line faint">none</div>');
+    }
+    var h=line(A,stA)+line(B,stB);
+    if(st.overlap!=null){
+      h+='<div class="vocab-line">Vocabulary overlap: <b>'+fmtPct(st.overlap,0)+'</b>'
+        +(st.shared&&st.shared.length?' · shared: '+st.shared.map(function(e){return esc(e);}).join(' '):'')+'</div>';
+    }
+    var box=el('tgStickerBox'); if(box) box.innerHTML=h;
+  })();
+}
+/* Calls — windowed timeline + answered/missed (from the daily table) plus an
+   all-time outcome mix. Platform-neutral (renders for IG chats with calls). */
+function renderCalls(b,rt){
+  if(!state.chat||!state.chat.calls) return;
+  var A=state.users[0],B=state.users[1], cl=state.chat.calls;
+  // Timeline: calls per bucket, stacked by who started the call.
+  var sa=[],sb=[];
+  for(var i=0;i<b.starts.length;i++){var ts=b.ts[i];
+    sa.push([ts,b.rows[i].A.calls||0]); sb.push([ts,b.rows[i].B.calls||0]);}
+  setChart('cCallsTime',{grid:baseGrid(),legend:legend([A,B]),
+    tooltip:Object.assign(tooltipBase(),{formatter:function(ps){
+      var d=new Date(ps[0].value[0]);var s=esc(fmtDate(d))+'<br>';
+      ps.forEach(function(p){s+=markDot(p.color)+esc(p.seriesName)+': <b>'+fmtNum(p.value[1])+'</b><br>';});return s;}}),
+    xAxis:timeAxis(), yAxis:valAxis({}),
+    series:[{name:A,type:'bar',stack:'calls',data:sa,itemStyle:{color:COLORS.a}},
+      {name:B,type:'bar',stack:'calls',data:sb,itemStyle:{color:COLORS.b}}]});
+  // Answered vs missed (windowed).
+  var ans=(rt.tot.A.call_answered||0)+(rt.tot.B.call_answered||0);
+  var mis=(rt.tot.A.call_missed||0)+(rt.tot.B.call_missed||0);
+  if(ans+mis>0){
+    setChart('cCallsMix',{tooltip:{trigger:'item',backgroundColor:PANEL,borderColor:GRID,textStyle:{color:TEXT}},
+      series:[{type:'pie',radius:['45%','70%'],center:['50%','52%'],
+        label:{color:TEXT,formatter:'{b}: {c}'},labelLine:{lineStyle:{color:GRID}},
+        data:[{name:'Answered',value:ans,itemStyle:{color:COLORS.a}},
+              {name:'Missed',value:mis,itemStyle:{color:COLORS.b}}]}]});
+  } else noData('cCallsMix');
+  // Talk-time + who-initiates box.
+  var secs=(rt.tot.A.call_seconds||0)+(rt.tot.B.call_seconds||0);
+  var box=el('callsBox');
+  if(box) box.innerHTML='<div class="vocab-line">Talk time in range: <b>'+fmtDur(secs/60)
+    +'</b> · median answered call: <b>'+fmtDur((cl.median_talk_s||0)/60)+'</b> (all-time)</div>'
+    +'<div class="vocab-line">Started calls in range: '+esc(A)+' <b>'+fmtNum(rt.tot.A.calls||0)
+    +'</b> · '+esc(B)+' <b>'+fmtNum(rt.tot.B.calls||0)+'</b></div>';
+  // Outcome mix (all-time).
+  var outs=cl.outcomes||{};
+  var oc={missed:'#8892a6',hangup:COLORS.a,busy:'#E0A23F',disconnect:COLORS.b};
+  var od=Object.keys(outs).map(function(k){return {name:k,value:outs[k],itemStyle:{color:oc[k]||'#7A6FF0'}};});
+  if(od.length){
+    setChart('cCallsOutcome',{tooltip:{trigger:'item',backgroundColor:PANEL,borderColor:GRID,textStyle:{color:TEXT}},
+      series:[{type:'pie',radius:['45%','70%'],center:['50%','52%'],
+        label:{color:TEXT,formatter:'{b}: {c}'},labelLine:{lineStyle:{color:GRID}},data:od}]});
+  } else noData('cCallsOutcome');
 }
 function section(title,inner){return '<div class="section"><div class="section-title">'+esc(title)+'</div>'+inner+'</div>';}
 function card(title,sub,inner){return '<div class="card"><h3>'+esc(title)+'</h3>'
@@ -564,6 +693,7 @@ function findingsSection(){
    findings" box. */
 var ANCHOR_IDS=['cVolume','cCal','cInit','cQ','cDepth','cTurns','cEmoji','cMedia',
   'cNight','cEnd','cRestart','cWait','cWe','cSent','cLSM','courtesyBox','cTgEdit',
+  'cCallsTime','cTgVoice','cTgReactLat','tgSigBox','cTgEditLat','tgStickerBox',
   'cxFunnel','cxDyn','cxLatL','cxFocus','cxTypeMix','cxNightL','cxInitL','cxGini',
   'cxBurstDur','connRecipBox','connMirrorBox'];
 var ANCHOR_SET={}; (function(){for(var i=0;i<ANCHOR_IDS.length;i++)ANCHOR_SET[ANCHOR_IDS[i]]=1;})();
@@ -921,6 +1051,7 @@ function renderAll(){
   safe(function(){renderPsycho(b,rt);},'psycho');
   safe(renderLanguage,'language');
   safe(function(){renderTelegram(rt);},'telegram');
+  safe(function(){renderCalls(b,rt);},'calls');
   safe(function(){renderShifts(rt);},'shifts');
   // Findings: windowed recompute for daily-table rules + all-time from insights.js.
   safe(function(){
@@ -1153,6 +1284,8 @@ function renderAllExceptVolumeZoom(){
   safe(function(){renderEndings(b,rt);},'endings');
   safe(function(){renderPsycho(b,rt);},'psycho');
   safe(renderLanguage,'language');
+  safe(function(){renderTelegram(rt);},'telegram');
+  safe(function(){renderCalls(b,rt);},'calls');
   safe(function(){renderShifts(rt);},'shifts');
   // Findings: windowed recompute for daily-table rules.
   safe(function(){
@@ -2270,6 +2403,8 @@ function renderSkeletonConnected(){
       + card('Initiation asymmetry','Share of conversations YOU started with each contact (all-time, volume-gated)','<div class="chart tall" id="cxInitL"></div>')
       + card('Night ownership','Who receives your 00:00–06:00 messages (all-time)','<div class="chart tall" id="cxNightL"></div>')
       + card('Openness','Your words per turn with each contact — where you talk in paragraphs vs monosyllables (all-time, volume-gated)','<div class="chart tall" id="cxOpenL"></div>')
+      + card('You react fastest to','Median time from their message to your reaction, fastest first · ≥30 reactions (all-time)','<div class="chart tall" id="cxReactYou"></div>')
+      + card('Reacts to you fastest','Median time from your message to their reaction, fastest first · ≥30 reactions (all-time)','<div class="chart tall" id="cxReactThem"></div>')
       + card('Style mirroring & code-switching','How much your texting style shape-shifts between contacts (all-time)','<div id="connMirrorBox" style="min-height:200px"></div>')
       + '</div>')
   + section('Social portfolio dynamics',
@@ -2515,6 +2650,13 @@ function renderConnLeaderboards(){
       tip:'questions '+fmtPct(r.question_rate,1)+' · I-words '+fmtPct(r.i_word_rate,1)
         +' · positivity '+fmtPct(r.pos_rate,1)};}),
     function(v){return fmtNum(v);});
+  // Reaction-latency leaderboards (both directions), fastest on top.
+  var ry=(lb.react_latency_you||[]).slice(0,12).map(function(r){
+    return {name:connLabel(r),v:r.react_median_min,tip:fmtNum(r.react_n)+' reactions (≥30 gate)'};});
+  ry.reverse(); connHBar('cxReactYou',ry,function(v){return fmtDur(v);});
+  var rm=(lb.react_latency_them||[]).slice(0,12).map(function(r){
+    return {name:connLabel(r),v:r.react_median_min,tip:fmtNum(r.react_n)+' reactions (≥30 gate)'};});
+  rm.reverse(); connHBar('cxReactThem',rm,function(v){return fmtDur(v);});
   // Style mirroring box.
   var cs=c.code_switching||{}, pc=(cs.per_contact||[]).slice();
   pc.sort(function(a,b){return (b.mirror_score||0)-(a.mirror_score||0);});

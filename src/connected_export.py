@@ -153,6 +153,13 @@ def reduce_message(msg: Dict[str, Any], timezone: str) -> Dict[str, Any]:
     dt = to_datetime(ts, timezone)
     iso = dt.isocalendar()
 
+    # Dated reactions (Telegram only) — [actor, date_ms] pairs, for the
+    # connected reaction-latency leaderboards. Instagram reactions carry no
+    # date, so this stays empty there and those contacts never gate in.
+    rx = [[r.get('actor', '') or '', r['date']]
+          for r in (msg.get('reactions') or [])
+          if isinstance(r, dict) and r.get('date') is not None]
+
     words = content.split() if real else []
     i = we = you = pos = neg = 0
     if real:
@@ -179,6 +186,7 @@ def reduce_message(msg: Dict[str, Any], timezone: str) -> Dict[str, Any]:
         'mon': dt.strftime('%Y-%m'),
         'week': f'{iso[0]}-W{iso[1]:02d}',
         'i': i, 'we': we, 'you': you, 'pos': pos, 'neg': neg,
+        'rx': rx,
         'media': _media_count(msg),
         'photos': _len_field(msg.get('photos')),
         'videos': _len_field(msg.get('videos')),
@@ -607,6 +615,25 @@ def build_connected_data(chats: List[Chat], owner: Any,
                     ct['_lat'].append(gap / 60000.0)
                     ct['_lat_ts'].append(cur['timestamp_ms'])
 
+        # reaction latency both directions (dated reactions = Telegram). The
+        # reactor is the reaction's actor; the reacted-to message's sender is
+        # the record owner. latency = react date − message ts (drop negatives
+        # and >7d noise).
+        for r in c.recs:
+            rx = r.get('rx')
+            if not rx:
+                continue
+            msg_ts = r['timestamp_ms']
+            sender = r['sender_name']
+            for actor, rdate in rx:
+                lat = (rdate - msg_ts) / 60000.0
+                if lat < 0 or lat > 7 * 24 * 60:
+                    continue
+                if actor in owners and sender not in owners:
+                    ct['_rx_you'].append(lat)      # you react to them
+                elif actor not in owners and sender in owners:
+                    ct['_rx_them'].append(lat)     # they react to you
+
         # per-contact monthly total volume (both sides) — dormancy resilience
         for r in c.recs:
             if not r['sys']:
@@ -668,6 +695,9 @@ def build_connected_data(chats: List[Chat], owner: Any,
             'initiation_share': round(ct['initiations'] / ct['sessions'], 3) if ct['sessions'] else 0.0,
             'reply_latency_median_min': _median(lat), 'reply_n': len(lat),
             'latency_gated': latency_ok,
+            # reaction latency (both directions), median minutes + volume.
+            'react_you_median_min': _median(ct['_rx_you']), 'react_you_n': len(ct['_rx_you']),
+            'react_them_median_min': _median(ct['_rx_them']), 'react_them_n': len(ct['_rx_them']),
             'words_per_turn': round(o_words / o_msgs, 3) if o_msgs else 0.0,
             'question_rate': round(ct['_o_q'] / o_msgs, 4) if o_msgs else 0.0,
             'i_word_rate': round(ct['_o_i'] / o_words, 4) if o_words else 0.0,
@@ -712,6 +742,18 @@ def build_connected_data(chats: List[Chat], owner: Any,
           'initiation_share': c['initiation_share'],
           'sessions': c['sessions']} for c in ungated),
         key=lambda x: x['initiation_share'], reverse=True)
+    # reaction-latency leaderboards (both directions), volume-gated >=30 each.
+    REACT_MIN = 30
+    react_you = sorted(
+        ({'name': c['name'], 'platform': c['platform'],
+          'react_median_min': c['react_you_median_min'], 'react_n': c['react_you_n']}
+         for c in contact_list if c['react_you_n'] >= REACT_MIN),
+        key=lambda x: x['react_median_min'])
+    react_them = sorted(
+        ({'name': c['name'], 'platform': c['platform'],
+          'react_median_min': c['react_them_median_min'], 'react_n': c['react_them_n']}
+         for c in contact_list if c['react_them_n'] >= REACT_MIN),
+        key=lambda x: x['react_median_min'])
     night = sorted(
         ({'name': c['name'], 'platform': c['platform'],
           'night_share': c['night_share'],
@@ -876,6 +918,8 @@ def build_connected_data(chats: List[Chat], owner: Any,
             'night': night[:25],
             'reciprocity_surplus': [_recip_row(c) for c in recip_surplus],
             'reciprocity_deficit': [_recip_row(c) for c in recip_deficit],
+            'react_latency_you': react_you[:25],
+            'react_latency_them': react_them[:25],
         },
         'code_switching': {
             'emoji_rate_variance': _variance(emoji_rates),
@@ -926,7 +970,8 @@ def _blank_contact(name: str, chat_id: str,
         'sent': 0, 'received': 0, 'emoji_sent': 0, 'media_sent': 0,
         'sessions': 0, 'initiations': 0, 'night_msgs': 0,
         'session_types': Counter(),
-        '_lat': [], '_lat_ts': [], '_o_msgs': 0, '_o_words': 0, '_o_wlen': 0,
+        '_lat': [], '_lat_ts': [], '_rx_you': [], '_rx_them': [],
+        '_o_msgs': 0, '_o_words': 0, '_o_wlen': 0,
         '_o_q': 0, '_o_i': 0, '_o_pos': 0, '_o_em': 0, '_o_lang': Counter(),
         '_c_msgs': 0, '_c_em': 0, '_month_vol': Counter(),
         '_first_ts': None, '_last_ts': None, '_first_sender': None, '_months': set(),
