@@ -274,6 +274,7 @@ var DATA = window.DASHBOARD_DATA = window.DASHBOARD_DATA || {};
 var state = {
   chatId:null, chat:null, isGroup:false,
   isConnected:false, connected:null, connectedVariant:'all', // owner cross-chat ("You — Connected") mode
+  connSentMode:'msgs', connRecipMode:'msgs', // msgs/words toggle on the volume-flow cards
   isCompare:false, compareIds:[],   // "⚖ Compare" mode — selected dyad chat ids
   users:[null,null],
   fullStart:null, fullEnd:null,   // Date objects (chat extent)
@@ -419,7 +420,7 @@ function renderSkeleton(){
   el('app').innerHTML = injectStripHosts(
   section('Pulse','<div class="grid kpis" id="kpiRow"></div>')
   + section('Story timeline',
-      card('Message volume','A above the line, partner mirrored below · change-points marked',
+      card('Message volume','A above the line, partner mirrored below',
         '<div class="chart tall" id="cVolume"></div>')
       + card('Activity calendar','Daily message volume — spot streaks, bursts and silences at a glance',
         '<div class="chart" id="cCal"></div>'))
@@ -1214,7 +1215,6 @@ function renderVolume(b){
     sa.push([ts, b.rows[i].A.msgs]);
     sb.push([ts, -b.rows[i].B.msgs]);
   }
-  var marks=changePointMarks();
   var opt={
     grid:baseGrid(),
     legend:legend([A,B]),
@@ -1229,35 +1229,18 @@ function renderVolume(b){
       textStyle:{color:MUTED},fillerColor:'rgba(77,182,172,.15)'},
       {type:'inside'}],
     series:[
-      areaSeries(A,sa,COLORS.a,marks),
-      areaSeries(B,sb,COLORS.b,null)
+      areaSeries(A,sa,COLORS.a),
+      areaSeries(B,sb,COLORS.b)
     ]
   };
   setChart('cVolume',opt);
   var c=charts['cVolume'];
   c.off('datazoom'); c.on('datazoom',onVolumeZoom);
 }
-function areaSeries(name,data,color,markLine){
-  var s={name:name,type:'line',data:data,showSymbol:false,smooth:false,
+function areaSeries(name,data,color){
+  return {name:name,type:'line',data:data,showSymbol:false,smooth:false,
     lineStyle:{width:1.5,color:color},itemStyle:{color:color},
     areaStyle:{color:color,opacity:.22}};
-  if(markLine) s.markLine=markLine;
-  return s;
-}
-function changePointMarks(){
-  var cps=(state.chat.change_points||[]).filter(function(cp){
-    if(!cp.date) return false;
-    var t=parseYMD(cp.date).getTime();
-    return t>=state.start.getTime() && t<=state.end.getTime();
-  });
-  if(!cps.length) return null;
-  return {symbol:'none',silent:false,
-    lineStyle:{color:'#E02F44',type:'dashed',width:1.2},
-    label:{show:true,color:'#E02F44',fontSize:10,formatter:function(p){return p.data.lbl;}},
-    data:cps.map(function(cp){
-      var top=(cp.signals&&cp.signals[0])?cp.signals[0].metric:'shift';
-      return {xAxis:parseYMD(cp.date).getTime(),lbl:top.replace(/_/g,' ')};
-    })};
 }
 var _zoomGuard=false;
 function onVolumeZoom(){
@@ -2436,21 +2419,21 @@ function renderSkeletonConnected(){
       + '</div>')
   + section('Contact leaderboards',
       '<div class="grid cols-2">'
-      + card('Where your messages go','Share of everything you sent · top 12 + others (in range)','<div class="chart tall" id="cxSentL"></div>')
-      + card('Attention hierarchy','Your mean reply latency per contact, fastest first · monthly sums pooled (means weighted by volume) · only contacts with ≥50 replies in range','<div class="chart tall" id="cxLatL"></div>')
-      + card('Initiation asymmetry — you start','Share of conversations YOU started with each contact (in range, volume-gated)','<div class="chart tall" id="cxInitL"></div>')
-      + card('Initiation asymmetry — they start toward you','Share of conversations THEY started (1 − your share) with each contact (in range, volume-gated)','<div class="chart tall" id="cxInitRevL"></div>')
-      + card('Night ownership','Who receives your 00:00–06:00 messages (in range)','<div class="chart tall" id="cxNightL"></div>')
-      + card('Openness','Your words per turn with each contact — where you talk in paragraphs vs monosyllables (in range, volume-gated)','<div class="chart tall" id="cxOpenL"></div>')
-      + card('You react fastest to','Mean time from their message to your reaction, fastest first · ≥30 reactions in range','<div class="chart tall" id="cxReactYou"></div>')
-      + card('Reacts to you fastest','Mean time from your message to their reaction, fastest first · ≥30 reactions in range','<div class="chart tall" id="cxReactThem"></div>')
-      + card('Style mirroring & code-switching','How much your texting style shape-shifts between contacts (in range)','<div id="connMirrorBox" style="min-height:200px"></div>')
+      + card('Where your messages go','Share of everything you sent · top 12 + others · 👥 groups included (in range)','<div class="chips" id="cxSentToggle"></div><div class="chart tall" id="cxSentL"></div>')
+      + card('Attention hierarchy','Your mean reply latency per contact, fastest first · monthly sums pooled (means weighted by volume) · only contacts with ≥50 replies in range · 1:1 chats only','<div class="chart tall" id="cxLatL"></div>')
+      + card('Initiation asymmetry — you start','Share of conversations YOU started with each contact (in range, volume-gated) · 1:1 chats only','<div class="chart tall" id="cxInitL"></div>')
+      + card('Initiation asymmetry — they start toward you','Share of conversations THEY started (1 − your share) with each contact (in range, volume-gated) · 1:1 chats only','<div class="chart tall" id="cxInitRevL"></div>')
+      + card('Night ownership','Who receives your 00:00–06:00 messages · 👥 groups included (in range)','<div class="chart tall" id="cxNightL"></div>')
+      + card('Openness','Your words per turn with each contact — where you talk in paragraphs vs monosyllables (in range, volume-gated) · 1:1 chats only','<div class="chart tall" id="cxOpenL"></div>')
+      + card('You react fastest to','Mean time from their message to your reaction, fastest first · ≥30 reactions in range · 1:1 chats only','<div class="chart tall" id="cxReactYou"></div>')
+      + card('Reacts to you fastest','Mean time from your message to their reaction, fastest first · ≥30 reactions in range · 1:1 chats only','<div class="chart tall" id="cxReactThem"></div>')
+      + card('Style mirroring & code-switching','How much your texting style shape-shifts between contacts (in range) · 1:1 chats only','<div id="connMirrorBox" style="min-height:200px"></div>')
       + '</div>')
   + section('Social portfolio dynamics',
       '<div class="grid cols-2">'
       + card('Attention concentration (Gini)','0 = attention spread evenly · 1 = one contact gets everything (monthly, in range)','<div class="chart" id="cxGini"></div>')
       + card('Active · churned · reactivated contacts','Monthly counts (churn = silent for the next two months; in range)','<div class="chart" id="cxDyn"></div>')
-      + card('Reciprocity','Messages you send vs receive — biggest surpluses (you over-invest) and deficits, log₂(sent/received) (in range)','<div id="connRecipBox" style="min-height:40px"></div><div class="chart tall" id="cxRecip"></div>')
+      + card('Reciprocity','You send vs receive — biggest surpluses (you over-invest) and deficits, log₂(sent/received) · 👥 groups: you vs the rest of the group combined (in range)','<div class="chips" id="cxRecipToggle"></div><div id="connRecipBox" style="min-height:40px"></div><div class="chart tall" id="cxRecip"></div>')
       + '</div>')
   + section('New-contact funnel',
       '<div class="grid cols-2">'
@@ -2686,42 +2669,73 @@ function connHBar(id,rows,fmt){
       label:{show:true,position:'right',color:MUTED,
         formatter:function(p){return fmt(p.value);}}}]});
 }
+/* msgs/words toggle chips on the volume-flow cards (share + reciprocity). The
+   default is 'msgs'; flipping to 'words' re-renders the card from the word
+   counters in contact_monthly (words_sent / words_recv). */
+function renderConnModeChips(id,key,setter){
+  var box=el(id); if(!box) return;
+  var mode=state[key]; box.innerHTML='';
+  [['msgs','Messages'],['words','Words']].forEach(function(m){
+    var chip=document.createElement('span');
+    chip.className='chip'+(mode===m[0]?' active':'');
+    chip.textContent=m[1];
+    chip.setAttribute('data-mode',m[0]);
+    chip.onclick=function(){ window[setter](m[0]); };
+    box.appendChild(chip);
+  });
+}
+function connSetSentMode(m){ if(state.connSentMode===m) return;
+  state.connSentMode=m; safe(renderConnLeaderboards,'clead'); }
+function connSetRecipMode(m){ if(state.connRecipMode===m) return;
+  state.connRecipMode=m; safe(renderConnRecip,'crecip'); }
+
 /* Every contact leaderboard recomputes from contact_monthly clipped to the
    active range. Volume gates are absolute WITHIN the window (≥ N in range). */
 function renderConnLeaderboards(){
   var agg=connContactAgg(), meta=connContactMeta(), g=connGates();
   var cids=Object.keys(agg);
-  function lbl(cid){ return connLabel(meta[cid]||{}); }
+  function isGroup(cid){ return !!(meta[cid]&&meta[cid].is_group); }
+  // Volume-flow label — prepend a 👥 badge for groups (kept on top of any
+  // platform badge connLabel adds in the merged 'all' view).
+  function lbl(cid){ return (isGroup(cid)?'👥 ':'')+connLabel(meta[cid]||{}); }
   function meget(cid){ return meta[cid]||{}; }
+  // Dyadic-behaviour boards are 1:1 only — groups never carry those semantics.
+  var dyadCids=cids.filter(function(cid){return !isGroup(cid);});
 
   // Where your messages go — top 12 + Others (share of everything sent IN RANGE).
-  var totSent=0; cids.forEach(function(cid){totSent+=agg[cid].sent||0;});
-  var sentRows=cids.filter(function(cid){return (agg[cid].sent||0)>0;})
-    .sort(function(a,b){return agg[b].sent-agg[a].sent;});
+  // Groups ARE destinations of your messages, so they join this board (👥). The
+  // msgs/words toggle switches the metric between message and word counts.
+  renderConnModeChips('cxSentToggle','connSentMode','connSetSentMode');
+  var sWords=state.connSentMode==='words';
+  function sMetric(cid){ return sWords?(agg[cid].words_sent||0):(agg[cid].sent||0); }
+  var totSent=0; cids.forEach(function(cid){totSent+=sMetric(cid);});
+  var sentRows=cids.filter(function(cid){return sMetric(cid)>0;})
+    .sort(function(a,b){return sMetric(b)-sMetric(a);});
   var top=sentRows.slice(0,12), covered=0;
-  var rows=top.map(function(cid){covered+=agg[cid].sent;
-    return {name:lbl(cid),v:totSent?agg[cid].sent/totSent:0,
-      tip:fmtNum(agg[cid].sent)+' messages'+connSplit(meget(cid))};});
+  var sUnit=sWords?' words':' messages';
+  var rows=top.map(function(cid){covered+=sMetric(cid);
+    return {name:lbl(cid),v:totSent?sMetric(cid)/totSent:0,
+      tip:fmtNum(sMetric(cid))+sUnit+connSplit(meget(cid))};});
   if(totSent>covered) rows.push({name:'Others',v:(totSent-covered)/totSent,
-    tip:fmtNum(totSent-covered)+' messages',c:OTHERS_COLOR});
+    tip:fmtNum(totSent-covered)+sUnit,c:OTHERS_COLOR});
   rows.sort(function(a,b){return b.v-a.v;});
   connHBar('cxSentL',rows,function(v){return fmtPct(v,1);});
 
   // Attention hierarchy — mean reply latency (pooled monthly sums), fastest first.
-  var lat=cids.filter(function(cid){return (agg[cid].reply_lat_n||0)>=g.min_replies;})
+  var lat=dyadCids.filter(function(cid){return (agg[cid].reply_lat_n||0)>=g.min_replies;})
     .map(function(cid){var a=agg[cid];
       return {name:lbl(cid),v:a.reply_lat_sum_min/a.reply_lat_n,tip:fmtNum(a.reply_lat_n)+' replies (≥'+g.min_replies+' in range)'};})
     .sort(function(a,b){return a.v-b.v;});           // fastest first -> top
   connHBar('cxLatL',lat,function(v){return fmtDur(v);});
 
   // Initiation asymmetry — you start (share of sessions you opened).
-  var init=cids.filter(function(cid){return (agg[cid].sent||0)>=g.min_msgs&&(agg[cid].sessions||0)>0;})
+  var init=dyadCids.filter(function(cid){return (agg[cid].sent||0)>=g.min_msgs&&(agg[cid].sessions||0)>0;})
     .map(function(cid){var a=agg[cid];
       return {name:lbl(cid),v:a.initiations/a.sessions,tip:fmtNum(a.sessions)+' sessions'};})
     .sort(function(a,b){return b.v-a.v;});
   connHBar('cxInitL',init,function(v){return fmtPct(v);});
 
-  // Night ownership — share of your 00:00–06:00 messages (in range).
+  // Night ownership — share of your 00:00–06:00 messages (groups included, 👥).
   var totNight=0; cids.forEach(function(cid){totNight+=agg[cid].night_sent||0;});
   var night=cids.filter(function(cid){return (agg[cid].night_sent||0)>0;})
     .map(function(cid){var a=agg[cid];
@@ -2730,26 +2744,26 @@ function renderConnLeaderboards(){
   connHBar('cxNightL',night,function(v){return fmtPct(v,1);});
 
   // Openness — your words per turn (words / owner turns) in range.
-  var open=cids.filter(function(cid){return (agg[cid].sent||0)>=g.min_msgs&&(agg[cid].turns_sent||0)>0;})
+  var open=dyadCids.filter(function(cid){return (agg[cid].sent||0)>=g.min_msgs&&(agg[cid].turns_sent||0)>0;})
     .map(function(cid){var a=agg[cid];
       return {name:lbl(cid),v:a.words_sent/a.turns_sent,tip:fmtNum(a.turns_sent)+' turns · '+fmtNum(a.words_sent)+' words'};})
     .sort(function(a,b){return b.v-a.v;});
   connHBar('cxOpenL',open,function(v){return fmtNum(v);});
 
   // Reaction-latency leaderboards (both directions), fastest first (mean seconds).
-  var ry=cids.filter(function(cid){return (agg[cid].react_you_n||0)>=g.react_min;})
+  var ry=dyadCids.filter(function(cid){return (agg[cid].react_you_n||0)>=g.react_min;})
     .map(function(cid){var a=agg[cid];
       return {name:lbl(cid),v:(a.react_you_sum_s/a.react_you_n)/60,tip:fmtNum(a.react_you_n)+' reactions (≥'+g.react_min+' in range)'};})
     .sort(function(a,b){return a.v-b.v;});
   connHBar('cxReactYou',ry,function(v){return fmtDur(v);});
-  var rm=cids.filter(function(cid){return (agg[cid].react_them_n||0)>=g.react_min;})
+  var rm=dyadCids.filter(function(cid){return (agg[cid].react_them_n||0)>=g.react_min;})
     .map(function(cid){var a=agg[cid];
       return {name:lbl(cid),v:(a.react_them_sum_s/a.react_them_n)/60,tip:fmtNum(a.react_them_n)+' reactions (≥'+g.react_min+' in range)'};})
     .sort(function(a,b){return a.v-b.v;});
   connHBar('cxReactThem',rm,function(v){return fmtDur(v);});
 
   // Style mirroring & code-switching — recompute style + variance over the range.
-  var ung=cids.filter(function(cid){return (agg[cid].sent||0)>=g.min_msgs;});
+  var ung=dyadCids.filter(function(cid){return (agg[cid].sent||0)>=g.min_msgs;});
   var emojiRates=[],wlenVals=[],geoVals=[],mirror=[];
   ung.forEach(function(cid){var a=agg[cid];
     var er=a.sent?(a.emoji_sent||0)/a.sent:0;
@@ -2777,7 +2791,8 @@ function renderConnLeaderboards(){
 function renderConnInitRev(){
   var agg=connContactAgg(), meta=connContactMeta(), g=connGates();
   var rows=Object.keys(agg)
-    .filter(function(cid){return (agg[cid].sent||0)>=g.min_msgs&&(agg[cid].sessions||0)>0;})
+    .filter(function(cid){return !(meta[cid]&&meta[cid].is_group)
+      &&(agg[cid].sent||0)>=g.min_msgs&&(agg[cid].sessions||0)>0;})
     .map(function(cid){var a=agg[cid];
       return {name:connLabel(meta[cid]||{}),v:1-(a.initiations/a.sessions),tip:fmtNum(a.sessions)+' sessions'};})
     .sort(function(a,b){return b.v-a.v;});
@@ -2817,16 +2832,26 @@ function renderConnDyn(){
    deficits, volume-gated, with in-range headline totals above. */
 function renderConnRecip(){
   var agg=connContactAgg(), meta=connContactMeta(), g=connGates();
+  // msgs/words toggle: reciprocity in messages (default) or words. For a group,
+  // "received" is every message/word from the rest of the group combined.
+  renderConnModeChips('cxRecipToggle','connRecipMode','connSetRecipMode');
+  var wMode=state.connRecipMode==='words';
+  function sM(a){ return wMode?(a.words_sent||0):(a.sent||0); }
+  function rM(a){ return wMode?(a.words_recv||0):(a.recv||0); }
+  var unit=wMode?'words':'messages';
   var sentTot=0,recvTot=0,rows=[];
   for(var cid in agg){ var a=agg[cid];
-    sentTot+=a.sent||0; recvTot+=a.recv||0;
-    if((a.sent||0)>=g.min_msgs && (a.recv||0)>0 && (a.sent||0)>0){
-      rows.push({name:connLabel(meta[cid]||{}),l2:Math.log(a.sent/a.recv)/Math.LN2,
-        sent:a.sent,recv:a.recv});
+    var s=sM(a), rv=rM(a);
+    sentTot+=s; recvTot+=rv;
+    // Volume gate stays on message count (unchanged) so the same ties qualify
+    // regardless of the toggle; only the plotted metric switches.
+    if((a.sent||0)>=g.min_msgs && rv>0 && s>0){
+      rows.push({name:(meta[cid]&&meta[cid].is_group?'👥 ':'')+connLabel(meta[cid]||{}),
+        l2:Math.log(s/rv)/Math.LN2, sent:s, recv:rv});
     }
   }
   var head=el('connRecipBox');
-  if(head) head.innerHTML='<div class="vocab-line">In range: you sent <b>'+fmtNum(sentTot)
+  if(head) head.innerHTML='<div class="vocab-line">In range ('+unit+'): you sent <b>'+fmtNum(sentTot)
     +'</b> · received <b>'+fmtNum(recvTot)+'</b> · ratio <b>'
     +(recvTot?fmtNum(sentTot/recvTot):'—')+'</b></div>';
   var pos=rows.filter(function(r){return r.l2>0;}).sort(function(a,b){return b.l2-a.l2;}).slice(0,8);
@@ -2838,7 +2863,7 @@ function renderConnRecip(){
     tooltip:{backgroundColor:PANEL,borderColor:GRID,textStyle:{color:TEXT},
       formatter:function(p){var r=arr[p.dataIndex];
         return esc(r.name)+': log₂ <b>'+(r.l2>=0?'+':'')+r.l2.toFixed(2)+'</b><br>'
-          +'sent '+fmtNum(r.sent)+' / received '+fmtNum(r.recv)+' (ratio '+fmtNum(r.sent/r.recv)+')';}},
+          +'sent '+fmtNum(r.sent)+' / received '+fmtNum(r.recv)+' '+unit+' (ratio '+fmtNum(r.sent/r.recv)+')';}},
     xAxis:valAxis({axisLabel:{color:MUTED,formatter:function(v){return (v>0?'+':'')+v;}}}),
     yAxis:{type:'category',data:arr.map(function(r){return r.name;}),
       axisLabel:{color:MUTED,width:135,overflow:'truncate'},axisLine:{lineStyle:{color:GRID}}},

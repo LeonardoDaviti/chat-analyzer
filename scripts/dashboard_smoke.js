@@ -421,6 +421,44 @@ try {
   if (!sigFull || sigFull === sigNarrow) throw new Error('connected leaderboard content did not change with the range');
   g("applyPreset('all')"); flush();
 
+  // --- OWNER FIXES: groups on volume-flow boards, msgs/words toggle. ---------
+  // (I1a) "Where your messages go" contains a 👥 group entry (real corpus has
+  //       4+ groups; the biggest ranks inside the top 12 by volume).
+  g("connSetSentMode('msgs')"); flush();
+  const sentLabels = g("(((window.__optCap||{})['cxSentL']||{}).yAxis||{}).data||[]");
+  const shareHasGroup = sentLabels.some((n) => String(n).indexOf('👥') >= 0);
+  console.log('share board groups | labels:', sentLabels.length, '| hasGroupBadge:', shareHasGroup);
+  if (!shareHasGroup) throw new Error('share board has no 👥 group entry');
+
+  // (I1b) Dyadic-behaviour boards must contain NO group ids (👥) — 1:1 only.
+  const dyBoards = ['cxLatL', 'cxInitL', 'cxInitRevL', 'cxOpenL', 'cxReactYou', 'cxReactThem'];
+  const dyGroupHit = g("(" + JSON.stringify(dyBoards) + ").filter(function(id){" +
+    "var d=(((window.__optCap||{})[id]||{}).yAxis||{}).data||[];" +
+    "return d.some(function(n){return String(n).indexOf('👥')>=0;});})");
+  console.log('dyadic boards group-free | checked:', dyBoards.length, '| withGroup:', dyGroupHit.length);
+  if (dyGroupHit.length) throw new Error('group leaked into dyadic board(s): ' + dyGroupHit.join(','));
+
+  // (I2) Reciprocity msgs/words toggle switches the plotted content + headline.
+  g("connSetRecipMode('msgs')"); flush();
+  const recipMsgs = g(lbSig('cxRecip'));
+  g("connSetRecipMode('words')"); flush();
+  const recipWords = g(lbSig('cxRecip'));
+  const headWords = byId['connRecipBox'] ? byId['connRecipBox']._html : '';
+  console.log('reciprocity toggle | chartContentDiffers:', recipMsgs !== recipWords,
+    '| wordsHeadline:', /\(words\)/.test(headWords));
+  if (recipMsgs === recipWords) throw new Error('reciprocity toggle did not change the chart');
+  if (!/\(words\)/.test(headWords)) throw new Error('reciprocity words headline missing');
+  g("connSetRecipMode('msgs')"); flush();
+
+  // (I2b) Share-board toggle switches content too.
+  g("connSetSentMode('msgs')"); flush();
+  const sentMsgsSig = g(lbSig('cxSentL'));
+  g("connSetSentMode('words')"); flush();
+  const sentWordsSig = g(lbSig('cxSentL'));
+  console.log('share toggle | contentDiffers:', sentMsgsSig !== sentWordsSig);
+  if (sentMsgsSig === sentWordsSig) throw new Error('share-board toggle did not change the chart');
+  g("connSetSentMode('msgs')"); flush();
+
   // --- Findings: Connected view renders strips under its charts (or, when a
   //     finding is unanchored, in the Other-findings box).
   flush();
@@ -455,6 +493,13 @@ try {
   g(`selectChat(${JSON.stringify(first)})`); flush();
   console.log('back from connected | isConnected:', g('state.isConnected'), '| isGroup:', g('state.isGroup'));
   if (g('state.isConnected')) throw new Error('connected state did not unwind');
+
+  // (I3) Per-chat Message volume chart no longer carries a change-point markLine.
+  const volCaptured = g("!!((window.__optCap||{})['cVolume'])");
+  const volMarkLine = g("(function(){var o=(window.__optCap||{})['cVolume'];" +
+    "if(!o||!o.series)return false;return o.series.some(function(s){return !!s.markLine;});})()");
+  console.log('volume markLine removed | captured:', volCaptured, '| anySeriesMarkLine:', volMarkLine);
+  if (volCaptured && volMarkLine) throw new Error('volume chart still has a change-point markLine layer');
 } catch (e) {
   failed = true;
   console.log('SMOKE FAILED:', e.message, '\n', (e.stack || '').split('\n').slice(0, 3).join('\n'));

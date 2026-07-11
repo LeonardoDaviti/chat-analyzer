@@ -245,17 +245,48 @@ def test_funnel_and_retention():
 # Groups lane + serialization
 # --------------------------------------------------------------------------- #
 
-def test_groups_excluded_from_contacts():
+def test_groups_join_contacts_as_volume_flow_only():
+    # Groups now surface as volume-flow contact rows (is_group flag) so they can
+    # land on the share / night / reciprocity boards — but they stay in the
+    # groups lane too and never gain dyadic counters.
     group = make_chat("g", [OWNER, "A", "B"], [
         msg(BASE, OWNER), msg(BASE + MIN, "A"), msg(BASE + 2 * MIN, "B"),
     ])
     dyad = make_chat("a", [OWNER, "A"], [msg(BASE, OWNER), msg(BASE + MIN, "A")])
     p = build_connected_data([group, dyad], OWNER, TZ, min_msgs=0, min_replies=0)
-    names = {c["name"] for c in p["contacts"]}
-    assert names == {"A"}                       # only the dyad contact
+
+    dyad_names = {c["name"] for c in p["contacts"] if not c.get("is_group")}
+    group_rows = [c for c in p["contacts"] if c.get("is_group")]
+    assert dyad_names == {"A"}                    # the only 1:1 contact
+    assert len(group_rows) == 1
+    grp = group_rows[0]
+    assert grp["chat_id"] == "g"
+    assert grp["sent"] == 1                       # owner messages
+    assert grp["received"] == 2                   # ALL non-owner messages combined
+    # groups never carry dyadic-behaviour fields
+    assert "reply_latency_median_min" not in grp
+    assert "initiation_share" not in grp
+    # groups lane is untouched
     assert p["groups"]["count"] == 1
     assert p["groups"]["messages_owner"] == 1
     assert p["totals"]["groups"] == 1
+
+
+def test_groups_absent_from_dyadic_leaderboards():
+    # A high-volume group must never appear on a dyadic-behaviour leaderboard.
+    group = make_chat("g", [OWNER, "A", "B"],
+                      [msg(BASE + i * MIN, OWNER if i % 2 == 0 else "A")
+                       for i in range(40)])
+    dyad = make_chat("a", [OWNER, "Z"],
+                     [msg(BASE + i * MIN, OWNER if i % 2 == 0 else "Z")
+                      for i in range(40)])
+    p = build_connected_data([group, dyad], OWNER, TZ, min_msgs=0, min_replies=0)
+    lb = p["leaderboards"]
+    for board in ("attention_hierarchy", "openness", "initiation",
+                  "react_latency_you", "react_latency_them"):
+        assert all(r["name"] != "g" for r in lb[board])
+    # contact_monthly DOES carry the group so the windowed volume-flow boards see it
+    assert any("g" in month for month in p["contact_monthly"].values())
 
 
 def test_dump_js_neutralises_script_and_registers_variant():
@@ -321,7 +352,9 @@ def test_telegram_group_flag_routes_to_groups_lane(tmp_path):
     p = build_connected_data([c], "Davidus", TZ, min_msgs=0, min_replies=0,
                              variant="telegram", platforms=["telegram"])
     assert p["groups"]["count"] == 1
-    assert p["contacts"] == []
+    # No 1:1 contacts, but the group surfaces as a volume-flow (is_group) row.
+    assert [c for c in p["contacts"] if not c.get("is_group")] == []
+    assert all(c.get("is_group") for c in p["contacts"])
 
 
 def test_contact_platform_tagging_and_merged_dual_owner():
@@ -540,6 +573,49 @@ def test_contact_monthly_merge_folds_rows():
     merged_ids = [cid for cid in month if cid.startswith("merged_")]
     assert len(merged_ids) == 1
     assert month[merged_ids[0]]["sent"] == 2
+
+
+def test_contact_monthly_words_recv():
+    # words_recv tracks the contact's real words per month (mirrors words_sent).
+    from src.timeutil import to_datetime
+    mon = to_datetime(BASE, TZ).strftime("%Y-%m")
+    raw = [
+        msg(BASE, OWNER, content="one two three"),        # owner: 3 words
+        msg(BASE + MIN, "A", content="alpha beta"),        # contact: 2 words
+        msg(BASE + 2 * MIN, "A", content="gamma delta epsilon"),  # contact: 3 words
+    ]
+    c = make_chat("a", [OWNER, "A"], raw)
+    p = build_connected_data([c], OWNER, TZ, min_msgs=0, min_replies=0)
+    r = _cm_row(p, mon, "a")
+    assert r["words_sent"] == 3
+    assert r["words_recv"] == 5
+    ct = next(x for x in p["contacts"] if x["name"] == "A")
+    assert ct["words_sent"] == 3 and ct["words_recv"] == 5
+    # reciprocity leaderboard rows carry words for the msgs/words toggle.
+    row = next(x for x in p["leaderboards"]["reciprocity_surplus"]
+               + p["leaderboards"]["reciprocity_deficit"] if x["name"] == "A")
+    assert row["words_sent"] == 3 and row["words_recv"] == 5
+
+
+def test_group_contact_monthly_counters_and_words():
+    # Group volume-flow counters land in contact_monthly with recv = all
+    # non-owner messages and words tracked both directions.
+    from src.timeutil import to_datetime
+    mon = to_datetime(BASE, TZ).strftime("%Y-%m")
+    group = make_chat("g", [OWNER, "A", "B"], [
+        msg(BASE, OWNER, content="hi all now"),        # owner 3 words
+        msg(BASE + MIN, "A", content="hey there"),      # 2 words
+        msg(BASE + 2 * MIN, "B", content="yo"),         # 1 word
+    ])
+    p = build_connected_data([group], OWNER, TZ, min_msgs=0, min_replies=0)
+    r = _cm_row(p, mon, "g")
+    assert r["sent"] == 1
+    assert r["recv"] == 2            # A + B combined (the rest of the group)
+    assert r["words_sent"] == 3
+    assert r["words_recv"] == 3      # 2 + 1
+    # dyadic counters are never emitted for a group
+    assert "sessions" not in r and "initiations" not in r
+    assert "reply_lat_n" not in r and "turns_sent" not in r
 
 
 def test_owner_aggregate_daily_table():

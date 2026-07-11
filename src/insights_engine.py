@@ -1238,7 +1238,10 @@ def crule_attention_volume_mismatch(p: Dict) -> Optional[Dict]:
                     'asym', 'Fast to some, loud with others', sent_str,
                     {'fastest': fastest['name'],
                      'reply_latency_median_min': fastest['reply_latency_median_min'],
-                     'reply_n': fastest['reply_n']},
+                     'reply_n': fastest['reply_n'],
+                     # Words alongside message volume — an insight review that
+                     # judges investment by message count should see word count too.
+                     'words_sent': fastest.get('words_sent', 0)},
                     sc, conf, _conn_window(p), anchor='cxLatL')
 
 
@@ -1413,6 +1416,10 @@ def crule_reciprocity_debts(p: Dict) -> Optional[Dict]:
                     'An uneven ledger', sent,
                     {'contact': r['name'], 'reciprocity': round(recip, 2),
                      'sent': int(r.get('sent', 0)), 'received': int(r.get('received', 0)),
+                     # Word counts beside the message ledger — same investment
+                     # question, measured in words as well as messages.
+                     'words_sent': int(r.get('words_sent', 0)),
+                     'words_recv': int(r.get('words_recv', 0)),
                      'imbalance': round(imb, 3)},
                     sc, conf, _conn_window(p), anchor='connRecipBox')
 

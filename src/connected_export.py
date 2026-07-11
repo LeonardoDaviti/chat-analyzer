@@ -474,7 +474,7 @@ def _apply_identity_merge(contacts: Dict[str, Dict[str, Any]],
 _ADD_INT_FIELDS = ('sent', 'received', 'emoji_sent', 'media_sent',
                    'initiations', 'sessions', 'night_msgs',
                    '_o_msgs', '_o_words', '_o_wlen', '_o_q', '_o_i', '_o_pos',
-                   '_o_em', '_c_msgs', '_c_em')
+                   '_o_em', '_c_msgs', '_c_em', '_c_words')
 _ADD_COUNTER_FIELDS = ('session_types', '_o_lang', '_month_vol')
 _EXTEND_LIST_FIELDS = ('_lat', '_lat_ts', '_rx_you', '_rx_them')
 
@@ -739,6 +739,9 @@ def build_connected_data(chats: List[Chat], owner: Any,
                 ct['_c_em'] += r['em']
                 cm['recv'] += 1
                 cm['recv_emoji'] += r['em']
+                if r['real']:
+                    ct['_c_words'] += r['w']
+                    cm['words_recv'] += r['w']
         ct['_first_ts'] = first_ts
         ct['_last_ts'] = last_ts
         ct['_months'] = {r['mon'] for r in c.recs if not r['sys']}
@@ -861,10 +864,64 @@ def build_connected_data(chats: List[Chat], owner: Any,
             texting_min_month[mo] += dur
             texting_min_week[wk] += dur
 
+    # ---- groups as VOLUME-FLOW contacts (share / night / reciprocity only) ---
+    # Groups are real destinations of the owner's messages, so they join the
+    # volume-flow boards through contact_monthly with the SAME counters
+    # (recv = every non-owner message in the group). They carry an is_group flag
+    # and NEVER get dyadic counters (no sessions / initiations / latency /
+    # reactions / style) — one-on-one semantics don't transfer — so they can only
+    # ever surface on the share / night / reciprocity boards, never on the
+    # attention/initiation/openness/reaction/mirroring boards. They also stay out
+    # of the dyad-only leaderboards, funnel, dormancy, novelty and Gini above.
+    group_contacts: Dict[str, Dict[str, Any]] = {}
+    for c in groups:
+        gc = _blank_contact(c.name, c.chat_id, getattr(c, 'platform', 'instagram'))
+        gc['is_group'] = True
+        first_ts = last_ts = None
+        for r in c.recs:
+            if r['sys']:
+                continue
+            if first_ts is None:
+                first_ts = r['timestamp_ms']
+            last_ts = r['timestamp_ms']
+            cm = gc['_cm'][r['mon']]
+            if r['sender_name'] in owners:
+                gc['sent'] += 1
+                gc['emoji_sent'] += r['em']
+                cm['sent'] += 1
+                cm['emoji_sent'] += r['em']
+                if r['h'] in NIGHT_HOURS:
+                    gc['night_msgs'] += 1
+                    cm['night_sent'] += 1
+                if r['real']:
+                    gc['_o_words'] += r['w']
+                    cm['words_sent'] += r['w']
+                    cm['chars_sent'] += r['ch']
+            else:
+                gc['received'] += 1
+                cm['recv'] += 1
+                cm['recv_emoji'] += r['em']
+                if r['real']:
+                    gc['_c_words'] += r['w']
+                    cm['words_recv'] += r['w']
+        gc['_first_ts'] = first_ts
+        gc['_last_ts'] = last_ts
+        gc['_months'] = {r['mon'] for r in c.recs if not r['sys']}
+        group_contacts[c.chat_id] = gc
+
     # ---- cross-platform identity merge (manual; 'all' variant only) ---- #
     # Merge BEFORE finalization so shares/medians/dates all recompute from the
     # combined raw accumulators. Per-platform variants stay unmerged.
     if variant == 'all' and identities:
+        # Groups are not a person and are never mergeable — reject any identity
+        # whose member key points at a group chat rather than silently ignoring it.
+        group_keys = {_member_key(getattr(c, 'platform', 'instagram'), c.chat_id)
+                      for c in groups}
+        for ident in identities:
+            bad = [m for m in ident['members'] if m in group_keys]
+            if bad:
+                raise ValueError('identities cannot merge group chats: '
+                                 + ', '.join(bad))
         _apply_identity_merge(contacts, sent_by_month_contact, identities)
 
     # ---- finalize contacts ---- #
@@ -890,6 +947,7 @@ def build_connected_data(chats: List[Chat], owner: Any,
             'name': ct['name'], 'chat_id': ct['chat_id'],
             'platform': ct['platform'],
             'sent': ct['sent'], 'received': ct['received'],
+            'words_sent': o_words, 'words_recv': ct['_c_words'],
             'reciprocity': round(ct['sent'] / ct['received'], 3) if ct['received'] else None,
             'emoji_sent': ct['emoji_sent'], 'media_sent': ct['media_sent'],
             'sessions': ct['sessions'], 'initiations': ct['initiations'],
@@ -930,6 +988,7 @@ def build_connected_data(chats: List[Chat], owner: Any,
     # ---- leaderboards ---- #
     ungated = [c for c in contact_list if not c['gated']]
     by_sent = [{'name': c['name'], 'platform': c['platform'], 'sent': c['sent'],
+                'words_sent': c['words_sent'],
                 'share': round(c['sent'] / total_sent, 4) if total_sent else 0.0,
                 **({'merged': True, 'platforms': c['platforms']}
                    if c.get('merged') else {})}
@@ -937,7 +996,8 @@ def build_connected_data(chats: List[Chat], owner: Any,
     attention_hierarchy = sorted(
         ({'name': c['name'], 'platform': c['platform'],
           'reply_latency_median_min': c['reply_latency_median_min'],
-          'reply_n': c['reply_n']} for c in contact_list if c['latency_gated']),
+          'reply_n': c['reply_n'], 'words_sent': c['words_sent']}
+         for c in contact_list if c['latency_gated']),
         key=lambda x: x['reply_latency_median_min'])
     openness = sorted(
         ({'name': c['name'], 'platform': c['platform'],
@@ -974,7 +1034,8 @@ def build_connected_data(chats: List[Chat], owner: Any,
     def _recip_row(c):
         return {'name': c['name'], 'platform': c['platform'],
                 'reciprocity': c['reciprocity'],
-                'sent': c['sent'], 'received': c['received']}
+                'sent': c['sent'], 'received': c['received'],
+                'words_sent': c['words_sent'], 'words_recv': c['words_recv']}
 
     # ================= A  merged timeline / attention ==================== #
     attention = _compute_attention(owner_stream, daily, timezone)
@@ -1109,7 +1170,7 @@ def build_connected_data(chats: List[Chat], owner: Any,
     # { "YYYY-MM": { "<chat_id>": {..nonzero counters..} } }. Only months with
     # activity get entries; zero counters are omitted to keep the payload lean.
     contact_monthly: Dict[str, Dict[str, Dict[str, Any]]] = {}
-    for cid, ct in contacts.items():
+    for cid, ct in list(contacts.items()) + list(group_contacts.items()):
         for mon, cell in ct['_cm'].items():
             row: Dict[str, Any] = {}
             for k, v in cell.items():
@@ -1119,6 +1180,26 @@ def build_connected_data(chats: List[Chat], owner: Any,
             if row:
                 contact_monthly.setdefault(mon, {})[cid] = row
     contact_monthly = {m: contact_monthly[m] for m in sorted(contact_monthly)}
+
+    # ---- append group rows to the contacts list (volume-flow only) ----
+    # These carry the is_group flag so the dashboard renders them with a 👥 badge
+    # on the share / night / reciprocity boards and skips them on every dyadic
+    # board. They are appended AFTER the dyad-only leaderboards / funnel / novelty
+    # so none of those are perturbed.
+    for cid, gc in group_contacts.items():
+        contact_list.append({
+            'name': gc['name'], 'chat_id': cid, 'platform': gc['platform'],
+            'is_group': True,
+            'sent': gc['sent'], 'received': gc['received'],
+            'words_sent': gc['_o_words'], 'words_recv': gc['_c_words'],
+            'reciprocity': round(gc['sent'] / gc['received'], 3) if gc['received'] else None,
+            'emoji_sent': gc['emoji_sent'],
+            'night_msgs': gc['night_msgs'],
+            'first_day': to_datetime(gc['_first_ts'], timezone).strftime('%Y-%m-%d') if gc['_first_ts'] else None,
+            'last_day': to_datetime(gc['_last_ts'], timezone).strftime('%Y-%m-%d') if gc['_last_ts'] else None,
+            'months_active': len(gc['_months']),
+            'gated': gc['sent'] < min_msgs,
+        })
 
     payload = {
         'owner': owner_label,
@@ -1200,7 +1281,7 @@ def build_connected_data(chats: List[Chat], owner: Any,
 #   georgian_share= lang_geo  / lang_total (owner real msgs tagged georgian)
 _CM_FIELDS = (
     'sent', 'recv', 'recv_emoji', 'initiations', 'sessions', 'night_sent',
-    'words_sent', 'turns_sent', 'emoji_sent', 'chars_sent',
+    'words_sent', 'words_recv', 'turns_sent', 'emoji_sent', 'chars_sent',
     'reply_lat_sum_min', 'reply_lat_n',
     'react_you_sum_s', 'react_you_n', 'react_them_sum_s', 'react_them_n',
     'o_wlen', 'lang_geo', 'lang_total',
@@ -1221,7 +1302,7 @@ def _blank_contact(name: str, chat_id: str,
         '_lat': [], '_lat_ts': [], '_rx_you': [], '_rx_them': [],
         '_o_msgs': 0, '_o_words': 0, '_o_wlen': 0,
         '_o_q': 0, '_o_i': 0, '_o_pos': 0, '_o_em': 0, '_o_lang': Counter(),
-        '_c_msgs': 0, '_c_em': 0, '_month_vol': Counter(),
+        '_c_msgs': 0, '_c_em': 0, '_c_words': 0, '_month_vol': Counter(),
         '_cm': defaultdict(_cm_cell),
         '_first_ts': None, '_last_ts': None, '_first_sender': None, '_months': set(),
     }

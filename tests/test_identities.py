@@ -180,6 +180,18 @@ def test_single_present_member_not_merged():
     assert c["platform"] == "instagram"
 
 
+def test_identity_referencing_a_group_is_rejected():
+    # A group is not a person and can never be merged; an identity whose member
+    # key points at a group chat must be rejected rather than silently ignored.
+    group = _chat("squad", [IG_OWNER, "A", "B"], [
+        _msg(BASE, IG_OWNER), _msg(BASE + MIN, "A"), _msg(BASE + 2 * MIN, "B"),
+    ], platform="instagram")
+    ident = [{"name": "Bogus",
+              "members": ["instagram:squad", "telegram:mariam_tg"]}]
+    with pytest.raises(ValueError):
+        _all([group, _mariam_tg()], identities=ident)
+
+
 def test_per_platform_variant_unmerged():
     # The merge is 'all'-only: passing identities to a per-platform variant is a
     # no-op even when both mapped contacts are present.
