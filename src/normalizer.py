@@ -161,9 +161,9 @@ def is_system_message(msg: Any) -> bool:
         True if this is a system message that should be skipped
     """
     if isinstance(msg, dict):
-        # Structural signal first: an unsent/removed message is not real content.
-        if msg.get('is_unsent'):
-            return True
+        # NOTE: the former `is_unsent` structural guard was removed — DATA_AUDIT
+        # §1b found `is_unsent` exists in neither export (only the always-false
+        # `is_unsent_image_by_messenger_kid_parent`), so the check was a no-op.
         content = msg.get('content', '') or ''
     else:
         content = msg or ''
@@ -218,6 +218,34 @@ def derive_message_type(msg: Dict[str, Any]) -> str:
     return 'text'
 
 
+def _capture_extra_fields(normalized: Dict[str, Any]) -> None:
+    """Land approved export fields onto the normalized message (in place).
+
+    Only sets a key when its source value is present (no null spam). Applies to
+    both platforms: ``call_duration`` is int seconds on Instagram (raw
+    ``call_duration``, verified max 109 s) and on Telegram (from
+    ``duration_seconds``); the Telegram loader already emits ``call_duration_s``
+    directly, this covers the Instagram path (DATA_AUDIT §4 P2/P9).
+    """
+    # Call talk-time as int seconds. Telegram sets this in the loader; here we
+    # cover Instagram (raw `call_duration` is already seconds).
+    if normalized.get('call_duration_s') is None:
+        cd = normalized.get('call_duration')
+        if cd is not None:
+            try:
+                normalized['call_duration_s'] = int(cd)
+            except (TypeError, ValueError):
+                pass
+
+    # Instagram share: carry the shared reel/post's owner (P9). Telegram shares
+    # are ``{link, forwarded}`` and have no owner, so this is Instagram-only.
+    share = normalized.get('share')
+    if isinstance(share, dict):
+        owner = share.get('original_content_owner')
+        if owner:
+            normalized['share_owner'] = str(owner)
+
+
 def normalize_message(msg: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize a single message.
     
@@ -251,6 +279,9 @@ def normalize_message(msg: Dict[str, Any]) -> Dict[str, Any]:
 
     # Derive a coarse message type from structural fields (photo/video/call/...)
     normalized['type'] = derive_message_type(normalized)
+
+    # Capture approved raw fields into the normalized schema (DATA_AUDIT §4).
+    _capture_extra_fields(normalized)
 
     # Decode content and detect language (skip system messages)
     if 'content' in normalized and normalized['content']:

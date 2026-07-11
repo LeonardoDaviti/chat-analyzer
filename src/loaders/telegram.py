@@ -74,15 +74,30 @@ def _entity_counts(text_entities: Any) -> Dict[str, int]:
     return counts
 
 
-def _map_reactions(reactions: Any) -> List[Dict[str, str]]:
-    """Expand Telegram's aggregated reactions to ``[{reaction, actor}]``.
+def _as_int(value: Any) -> int | None:
+    """Best-effort int coercion; ``None`` when the value is missing/unparseable."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _map_reactions(reactions: Any) -> List[Dict[str, Any]]:
+    """Expand Telegram's aggregated reactions to ``[{reaction, actor, date?}]``.
 
     Each aggregated entry is ``{type, count, emoji, recent:[{from, from_id,
     date}]}``. We emit one Instagram-shaped reaction per named recent actor; if a
     reaction has a count but no named actors, we still emit ``count`` entries
     with a blank actor so reactions-*received* is counted on the message owner.
+
+    The reactor's ``date`` (ISO local string, 100% coverage per DATA_AUDIT §2 P3)
+    is carried as ``date`` in epoch ms — converted the same way message
+    timestamps are — so reaction latency becomes computable downstream. The emoji
+    is carried verbatim (no lowering/stripping) so its identity survives for P5.
     """
-    out: List[Dict[str, str]] = []
+    out: List[Dict[str, Any]] = []
     for r in reactions or []:
         if not isinstance(r, dict):
             continue
@@ -90,8 +105,15 @@ def _map_reactions(reactions: Any) -> List[Dict[str, str]]:
         recent = r.get("recent") or []
         if recent:
             for rec in recent:
-                out.append({"reaction": emoji,
-                            "actor": (rec or {}).get("from", "") or ""})
+                rec = rec or {}
+                entry: Dict[str, Any] = {"reaction": emoji,
+                                         "actor": rec.get("from", "") or ""}
+                # P3: preserve the reaction timestamp as epoch ms.
+                if rec.get("date") is not None:
+                    ts = _ts_ms({"date": rec.get("date")})
+                    if ts:
+                        entry["date"] = ts
+                out.append(entry)
         else:
             try:
                 n = int(r.get("count", 0) or 0)
@@ -147,6 +169,13 @@ def _apply_media(out: Dict[str, Any], msg: Dict[str, Any]) -> None:
     elif media_type in _VOICE_MEDIA:
         out["audio_files"] = [{"uri": str(file_ref)}]
 
+    # P1: carry voice/round-video/audio playback length (seconds). Stickers and
+    # photos have no duration; calls are handled on their own paths.
+    if media_type in _VIDEO_MEDIA or media_type in _VOICE_MEDIA:
+        dur = _as_int(msg.get("duration_seconds"))
+        if dur is not None:
+            out["media_duration_s"] = dur
+
     # Stickers: dedicated media_type or a bare sticker emoji.
     if media_type == "sticker" or msg.get("sticker_emoji"):
         out["sticker"] = {"emoji": msg.get("sticker_emoji", "")}
@@ -179,8 +208,12 @@ def _build_message(msg: Dict[str, Any]) -> Dict[str, Any] | None:
             "call_duration": msg.get("duration_seconds"),
             "msg_id": msg.get("id"),
         }
+        # P2: talk-time as int seconds + outcome, on the service-message path.
+        dur = _as_int(msg.get("duration_seconds"))
+        if dur is not None:
+            out["call_duration_s"] = dur
         if msg.get("discard_reason"):
-            out["call_discard_reason"] = msg.get("discard_reason")
+            out["call_discard_reason"] = str(msg.get("discard_reason"))
         return out
 
     # Regular message.
@@ -199,6 +232,12 @@ def _build_message(msg: Dict[str, Any]) -> Dict[str, Any] | None:
     # Phone call reported on a regular message (media_type variant), if present.
     if msg.get("media_type") == "phone_call":
         out["call_duration"] = msg.get("duration_seconds")
+        # P2: same call fields must survive on this path too.
+        dur = _as_int(msg.get("duration_seconds"))
+        if dur is not None:
+            out["call_duration_s"] = dur
+        if msg.get("discard_reason"):
+            out["call_discard_reason"] = str(msg.get("discard_reason"))
 
     _apply_media(out, msg)
 

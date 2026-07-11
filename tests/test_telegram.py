@@ -175,8 +175,10 @@ def test_parse_message_field_mapping():
     assert msgs[2]["entities"] == {"link": 1, "hashtag": 1, "mention": 1}
     # edit converted to ms
     assert msgs[1]["edited_ms"] == 1700000100 * 1000
-    # reaction mapped to Instagram shape
-    assert msgs[1]["reactions"] == [{"reaction": "\U0001F44D", "actor": OTHER}]
+    # reaction mapped to Instagram shape (+ P3 reaction timestamp in epoch ms)
+    r0 = msgs[1]["reactions"][0]
+    assert r0["reaction"] == "\U0001F44D" and r0["actor"] == OTHER
+    assert isinstance(r0["date"], int) and r0["date"] > 0
     # media mapping
     assert msgs[4]["photos"] and msgs[5]["audio_files"]
     # phone call service -> call message with duration
@@ -318,6 +320,105 @@ def test_payload_carries_platform_and_telegram(tmp_path):
     assert payload["platform"] == "telegram"
     assert "telegram" in payload
     assert payload["telegram"]["per_user"][OWNER]["edit_rate"] == 0.5
+
+
+# --------------------------------------------------------------------------- #
+# DATA-CAPTURE regressions (DATA_AUDIT §4 P1–P7) — synthetic data only
+# --------------------------------------------------------------------------- #
+
+def test_media_duration_carried_voice_round_video_audio():
+    """P1: voice / round-video / audio_file carry duration as media_duration_s."""
+    data = {
+        "name": OTHER, "type": "personal_chat", "id": 1,
+        "messages": [
+            {"id": 1, "type": "message", "date_unixtime": "1700000000",
+             "from": OWNER, "text": "", "media_type": "voice_message",
+             "duration_seconds": 8, "file": "v.ogg"},
+            {"id": 2, "type": "message", "date_unixtime": "1700000100",
+             "from": OTHER, "text": "", "media_type": "video_message",
+             "duration_seconds": 15, "file": "r.mp4"},
+            {"id": 3, "type": "message", "date_unixtime": "1700000200",
+             "from": OWNER, "text": "", "media_type": "audio_file",
+             "duration_seconds": 200, "file": "a.mp3"},
+            # a sticker has no duration -> no media_duration_s key
+            {"id": 4, "type": "message", "date_unixtime": "1700000300",
+             "from": OTHER, "text": "", "media_type": "sticker",
+             "sticker_emoji": "\U0001F602"},
+        ],
+    }
+    msgs = {m["msg_id"]: m for m in parse_telegram_result(data)["messages"]}
+    assert msgs[1]["media_duration_s"] == 8
+    assert msgs[2]["media_duration_s"] == 15
+    assert msgs[3]["media_duration_s"] == 200
+    assert "media_duration_s" not in msgs[4]
+
+
+def test_call_fields_survive_both_paths():
+    """P2: call_duration_s + call_discard_reason on service AND media_type paths."""
+    data = {
+        "name": OTHER, "type": "personal_chat", "id": 1,
+        "messages": [
+            # service-message call path
+            {"id": 1, "type": "service", "date_unixtime": "1700000000",
+             "actor": OWNER, "action": "phone_call",
+             "duration_seconds": 42, "discard_reason": "hangup",
+             "text": ""},
+            # media_type call path on a regular message
+            {"id": 2, "type": "message", "date_unixtime": "1700000100",
+             "from": OTHER, "text": "", "media_type": "phone_call",
+             "duration_seconds": 90, "discard_reason": "busy"},
+        ],
+    }
+    msgs = {m["msg_id"]: m for m in parse_telegram_result(data)["messages"]}
+    assert msgs[1]["call_duration_s"] == 42
+    assert msgs[1]["call_discard_reason"] == "hangup"
+    assert msgs[2]["call_duration_s"] == 90
+    assert msgs[2]["call_discard_reason"] == "busy"
+
+
+def test_reaction_date_and_emoji_identity():
+    """P3 + P5: reaction carries date (epoch ms) and the emoji verbatim."""
+    reacts = _map_reactions([{
+        "type": "emoji", "count": 1, "emoji": "\U0001F97A",
+        "recent": [{"from": "Zed", "from_id": "u9",
+                    "date": "2023-11-14T22:14:10"}],
+    }])
+    assert len(reacts) == 1
+    assert reacts[0]["reaction"] == "\U0001F97A"      # emoji not lowered/stripped
+    assert reacts[0]["actor"] == "Zed"
+    assert isinstance(reacts[0]["date"], int) and reacts[0]["date"] > 0
+    # count-only reactions (no named recent) still carry no bogus date key
+    blank = _map_reactions([{"type": "emoji", "count": 2, "emoji": "x"}])
+    assert all("date" not in b for b in blank)
+
+
+def test_sticker_emoji_flows():
+    """P4: sticker emoji identity survives into the normalized message."""
+    data = {
+        "name": OTHER, "type": "personal_chat", "id": 1,
+        "messages": [{"id": 1, "type": "message", "date_unixtime": "1700000000",
+                      "from": OWNER, "text": "", "media_type": "sticker",
+                      "sticker_emoji": "\U0001F62D"}],
+    }
+    m = parse_telegram_result(data)["messages"][0]
+    assert m["sticker"]["emoji"] == "\U0001F62D"
+
+
+def test_edited_ms_flows():
+    """P6: edited_unixtime survives as edited_ms (epoch ms)."""
+    msgs = {m["msg_id"]: m for m in parse_telegram_result(_result())["messages"]}
+    assert msgs[1]["edited_ms"] == 1700000100 * 1000
+
+
+def test_forwarded_from_flows():
+    """P7: forwarded_from source identity survives on the message."""
+    data = {
+        "name": OTHER, "type": "personal_chat", "id": 1,
+        "messages": [{"id": 1, "type": "message", "date_unixtime": "1700000000",
+                      "from": OWNER, "text": "hi", "forwarded_from": "Some Channel"}],
+    }
+    m = parse_telegram_result(data)["messages"][0]
+    assert m["forwarded_from"] == "Some Channel"
 
 
 def test_instagram_payload_has_no_telegram():
