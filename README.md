@@ -27,26 +27,12 @@ both.](docs/img/chat.png)
 *Per-chat view — pulse metrics, story timeline and balance charts. The
 Instagram / Telegram platform filter sits right next to the chat picker.*
 
-![Plain-language Findings cards explaining what stands out in a
-chat.](docs/img/findings.png)
-*Findings — short, plain-language callouts ("a turning point", "the record
-book", "laughing together"), each with the numbers behind it and a "show me →"
-link to its chart.*
-
-![The chat picker open, listing every chat with a platform badge and the
-platform filter chips above it.](docs/img/platform_filter.png)
-*The chat picker — Instagram and Telegram chats live in one list (platform
-badges shown); the filter chips at the top narrow it to one platform.*
 
 ![The Connected view: a cross-chat profile of you across every
 conversation.](docs/img/connected.png)
 *👤 You — Connected — a cross-chat portrait of you: texting span, attention
 spread, session mix, and where your messages go across everyone.*
 
-![The setup drop page where you drag in an export zip or
-folder.](docs/img/setup.png)
-*The setup page — drop an export **.zip or folder**, pick a file/folder, or
-paste a path. "Re-analyze everything" and "Start fresh" manage your data.*
 
 ---
 
