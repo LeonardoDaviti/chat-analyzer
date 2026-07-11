@@ -33,6 +33,18 @@ conversation.](docs/img/connected.png)
 *👤 You — Connected — a cross-chat portrait of you: texting span, attention
 spread, session mix, and where your messages go across everyone.*
 
+The same dashboard reflows for a phone browser — the chat picker becomes a
+full-screen drawer, the KPI tiles stack two-per-row, the time-range chips
+scroll sideways, and the charts resize to the screen:
+
+<p>
+<img src="docs/img/mobile_chat.png" alt="The per-chat dashboard on a phone: full-width chat picker, two-per-row KPI tiles, sideways-scrolling time-range chips." width="300">
+<img src="docs/img/mobile_connected.png" alt="The Connected view on a phone: findings strip and stacked KPI tiles." width="300">
+</p>
+
+*The per-chat and Connected views on a phone. Analysis still runs on your
+computer — the phone is a viewer (see [On your phone](#on-your-phone)).*
+
 
 ---
 
@@ -348,6 +360,51 @@ time slider, and every panel updates. It includes:
 
 None of this is a judgement or a diagnosis — it's just a friendly, detailed
 mirror of the patterns in your own conversations.
+
+---
+
+## On your phone
+
+The dashboard is responsive — it works in a phone browser and can be **installed
+as an app (PWA)** when you open it through the launcher. To be clear about what
+this is and isn't: **the analysis always runs on your computer.** There is no
+native app and nothing runs on the phone — your phone is just a **viewer** of the
+dashboard your computer is serving on your home network. Nothing ever leaves your
+machines.
+
+**Open the dashboard on your phone (same Wi-Fi):**
+
+1. On your computer, start the launcher. By default it prints a `127.0.0.1`
+   address, which only works *on the computer itself*. To reach it from your
+   phone, start it bound to your network instead:
+
+   ```
+   chat-analyzer --host 0.0.0.0
+   ```
+   (or `python launcher.py --host 0.0.0.0` from source). It will then also print
+   an `http://<your-computer's-LAN-IP>:8347/` address.
+
+   > **Security note:** `--host 0.0.0.0` exposes the dashboard to every device on
+   > your network. Only do this on a network you trust (your home Wi-Fi), and stop
+   > the launcher when you're done. Without this flag the server stays on
+   > `127.0.0.1` and is not reachable from other devices.
+
+2. On your phone's browser, go to that `http://<LAN-IP>:8347/` address. The
+   dashboard loads in its mobile layout.
+
+**Add it to your home screen (install the PWA):**
+
+- **iPhone / Safari:** tap the **Share** button → **Add to Home Screen**.
+- **Android / Chrome:** tap the **⋮** menu → **Install app** / **Add to Home
+  Screen**.
+
+Once installed it opens full-screen like an app and caches the interface for
+quick loads, but it's still only showing the analysis your computer produced.
+Re-run the analysis on the computer and refresh to see the new numbers.
+
+*(Opening the dashboard's `index.html` directly as a file gets you the same
+responsive layout, but the installable-app features only appear when it's served
+by the launcher.)*
 
 ---
 

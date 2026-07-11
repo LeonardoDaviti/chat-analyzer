@@ -76,8 +76,12 @@ const sandbox = {
   console, setTimeout: (fn) => { queue.push(fn); return 1; }, clearTimeout() {},
   setInterval: () => 1, clearInterval() {},
   requestAnimationFrame: (fn) => { queue.push(fn); return 1; },
-  navigator: { userAgent: 'node' },
-  location: { hash: '', href: 'file:///dash/index.html' },
+  // Emulate a browser that DOES support service workers, but keep the file://
+  // location (protocol 'file:') so the page's guarded registration must NOT
+  // fire. __swReg counts any register() call — it must stay 0 on file://.
+  navigator: { userAgent: 'node', serviceWorker: { register: function () { sandbox.__swReg = (sandbox.__swReg || 0) + 1; return { catch: function () {} }; } } },
+  __swReg: 0,
+  location: { hash: '', href: 'file:///dash/index.html', protocol: 'file:' },
   addEventListener() {}, removeEventListener() {},
   matchMedia: () => ({ matches: false, addListener() {}, addEventListener() {} }),
   devicePixelRatio: 1,
@@ -115,6 +119,25 @@ for (let i = 0; i < 2000 && queue.length; i++) queue.shift()();
 const g = (expr) => vm.runInContext(expr, ctx);
 const flush = () => { for (let i = 0; i < 2000 && queue.length; i++) queue.shift()(); };
 console.log('scripts lazy-loaded:', scriptsLoaded);
+
+// --- M4.1 responsive + PWA static checks (source-level) --------------------
+const hasViewport = /<meta[^>]+name="viewport"/.test(html);
+const hasMedia = /@media\s*\(max-width:640px\)/.test(html) && /@media\s*\(max-width:900px\)/.test(html);
+const hasResize = /addEventListener\('resize',\s*scheduleResize\)/.test(html)
+  && /addEventListener\('orientationchange'/.test(html)
+  && /function scheduleResize/.test(html);
+const swGuarded = /location\s*&&\s*location\.protocol|location\.protocol/.test(html)
+  && /navigator\.serviceWorker\.register\('\/sw\.js'\)/.test(html)
+  && /'http:'|"http:"/.test(html);
+console.log('responsive | viewportMeta:', hasViewport, '| mediaQueries:', hasMedia,
+  '| resizeListenerDebounced:', hasResize, '| swRegistrationGuarded:', swGuarded);
+if (!hasViewport) { console.log('SMOKE FAILED: viewport meta missing'); process.exit(1); }
+if (!hasMedia) { console.log('SMOKE FAILED: mobile media queries missing'); process.exit(1); }
+if (!hasResize) { console.log('SMOKE FAILED: debounced resize listener not wired'); process.exit(1); }
+if (!swGuarded) { console.log('SMOKE FAILED: guarded sw registration missing'); process.exit(1); }
+// Runtime: under the file:// stub the registration must not have run.
+if (sandbox.__swReg) { console.log('SMOKE FAILED: sw registered under file:// (__swReg=' + sandbox.__swReg + ')'); process.exit(1); }
+console.log('sw registration under file:// | active:', !!sandbox.__swReg, '(must be false)');
 
 // isolate per-chart failures (cCal is a known stub limitation)
 try { g("(function(){var _sc=setChart; setChart=function(id,opt){try{_sc(id,opt);}catch(e){if(id!=='cCal'&&id!=='cgCal')console.log('CHART FAIL:',id,'-',e.message.slice(0,60));}};})()"); } catch (e) {}

@@ -18,7 +18,13 @@ _TEMPLATE = r'''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#181B1F">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<!-- PWA manifest — 404s harmlessly on file://; served by the launcher over http(s). -->
+<link rel="manifest" href="/manifest.webmanifest">
 <title>Relationship Analytics Dashboard</title>
 <style>
 :root{
@@ -196,6 +202,64 @@ select:focus,input:focus,.dd-btn:focus{border-color:var(--a)}
   color:var(--muted);background:var(--panel-2)}
 .cmp-dyad-row{margin:8px 0}
 .cmp-dyad-name{font-size:12px;font-weight:600;margin-bottom:2px;display:flex;align-items:center;gap:6px}
+
+/* ============================================================ *
+ * Responsive / mobile (M4.1). The dashboard is a self-contained
+ * web app; these rules make it usable on a phone browser. Analysis
+ * still runs on the computer — the phone is only a viewer.
+ * ============================================================ */
+/* Tablet / narrow desktop: every 2-up grid collapses to one column. */
+@media(max-width:900px){
+  .grid.cols-2{grid-template-columns:1fr}
+  .cols-2{grid-template-columns:1fr}
+  .wrap{padding:0 12px 56px}
+}
+/* Phone: single-column everything, touch-sized controls, a full-width chat
+   drawer, horizontally-scrolling preset chips and shorter charts. */
+@media(max-width:640px){
+  html,body{font-size:15px}
+  .wrap{padding:0 10px 56px}
+  .topbar-inner{padding:8px 10px;gap:8px 12px}
+  .brand{width:100%;margin:0 0 2px}
+  /* Controls flow into rows; the chat control and range take a full row each. */
+  .control{flex:1 1 auto;min-width:0}
+  .control#platformControl{flex:1 1 100%}
+  /* Bigger tap targets (>=44px) for buttons, inputs, selects and the dd button. */
+  .dd-btn,select,input,button{min-height:44px;font-size:15px}
+  .dd-btn{min-width:0;width:100%}
+  .chatDD,.dd{width:100%}
+  /* Chat picker becomes a full-width, full-height drawer sheet. */
+  .dd-panel{position:fixed;top:0;left:0;right:0;bottom:0;width:100%;min-width:0;
+    max-height:100vh;height:100vh;border-radius:0;padding:14px 12px calc(14px + env(safe-area-inset-bottom));
+    box-shadow:none;overflow:auto}
+  .dd-panel.open{display:block}
+  .dd-search{position:sticky;top:0;background:var(--panel);z-index:1;margin-bottom:10px}
+  .dd-item{padding:12px 10px}
+  /* Preset chips scroll horizontally instead of wrapping. */
+  #presetChips{flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;
+    padding-bottom:4px;scrollbar-width:none}
+  #presetChips::-webkit-scrollbar{display:none}
+  .chip{flex:0 0 auto;padding:8px 12px}
+  /* Custom range inputs stack vertically. */
+  .daterow{flex-direction:column;align-items:stretch;gap:8px}
+  .daterow input[type=date],.daterow button{width:100%}
+  .daterow .faint{display:none}
+  /* KPI tiles: exactly two per row. */
+  .kpis{grid-template-columns:repeat(2,1fr)}
+  .kpi .value{font-size:22px}
+  /* Charts get a reduced, thumb-friendly height. */
+  .chart{height:260px}
+  .chart.tall{height:280px}
+  .chart.short{height:190px}
+  /* Tables that can't reflow scroll horizontally rather than overflow the card. */
+  .lt-table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch;
+    white-space:nowrap}
+  /* Findings strips / cards go full width already; keep them readable. */
+  .fstrip-text{min-width:0}
+  /* Compare-mode picker: larger, thumb-friendly checkboxes. */
+  .cmp-opt{padding:9px 12px;font-size:14px}
+  .cmp-opt .swatch{width:12px;height:12px}
+}
 </style>
 </head>
 <body data-palette="#4DB6AC,#9E9E9E">
@@ -402,15 +466,32 @@ function getChart(id){
   charts[id]=echarts.init(node,null,{renderer:'canvas'});
   return charts[id];
 }
+/* Force ECharts tooltips to stay inside the viewport (confine:true). On narrow
+   phone screens an unconfined tooltip renders off-screen; setting it globally
+   here means every chart's tooltip is reachable without editing each option. */
+function confineTooltip(t){
+  if(!t) return t;
+  if(Array.isArray(t)){ for(var i=0;i<t.length;i++) confineTooltip(t[i]); return t; }
+  if(t.confine==null) t.confine=true;
+  return t;
+}
 function setChart(id,opt){
   var c=getChart(id); if(!c) return;
+  if(opt&&opt.tooltip) confineTooltip(opt.tooltip);
   c.setOption(opt,true);
 }
 function disposeCharts(){
   for(var k in charts){ try{charts[k].dispose();}catch(e){} }
   charts={};
 }
-window.addEventListener('resize',function(){ for(var k in charts){ try{charts[k].resize();}catch(e){} } });
+/* Debounced resize of every live chart — fires on window resize AND on phone
+   orientation changes so ECharts re-lays-out to the new viewport width. */
+var _resizeTimer=null;
+function resizeCharts(){ for(var k in charts){ try{charts[k].resize();}catch(e){} } }
+function scheduleResize(){ if(_resizeTimer) clearTimeout(_resizeTimer);
+  _resizeTimer=setTimeout(resizeCharts,150); }
+window.addEventListener('resize',scheduleResize);
+window.addEventListener('orientationchange',scheduleResize);
 
 /* ============================================================ *
  * RENDER: page skeleton
@@ -3655,6 +3736,21 @@ function init(){
 }
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init);
 else init();
+
+/* PWA service worker — registered ONLY when the launcher serves this page over
+   http(s). On file:// (opened directly, no launcher) location.protocol is
+   'file:' and navigator.serviceWorker is absent, so this degrades silently and
+   nothing is fetched. The worker itself is served by the launcher at /sw.js. */
+(function registerServiceWorker(){
+  try{
+    var proto=(location&&location.protocol)||'';
+    if((proto==='http:'||proto==='https:')&&navigator&&navigator.serviceWorker){
+      window.addEventListener('load',function(){
+        navigator.serviceWorker.register('/sw.js').catch(function(){});
+      });
+    }
+  }catch(e){}
+})();
 </script>
 </body>
 </html>
