@@ -133,6 +133,14 @@ app. It bundles everything, so there is nothing to install.
 Everything still runs 100% on your own computer — the little web page is just
 the app's screen; nothing is uploaded.
 
+**Sharing a computer? Use profiles.** The setup page has a **Profile** section
+(and a small switcher in the dashboard corner). Each profile keeps its own
+chats, analysis and dashboard completely separate, so a friend can try the tool
+on your laptop without mixing your data with theirs — click **New profile**, give
+it a name, and their import lands in their own space. Switch back any time from
+the same dropdown. Your existing data becomes the **`default`** profile
+automatically the first time you update, so nothing moves or disappears.
+
 **Where your results are saved:** the app stores your imported chats, the
 `Outputs/` files and the `Dashboard/` in a **`ChatAnalyzer`** folder inside your
 **Documents** folder (for example `Documents/ChatAnalyzer` — on Windows
@@ -414,11 +422,26 @@ setup page you can **drag the whole folder onto the drop zone**, click
 **choose a folder** to pick it, or paste its path. (You can also drop a plain
 `.zip`, or copy the folder into `Chats/Telegram/` yourself.)
 
-**Someone else wants to try it on my computer — how do I clear my data first?**
-On the setup page click **Start fresh (archive current data)**. It moves your
-current `Chats/`, `Outputs/` and `Dashboard/` into a timestamped
-`ChatAnalyzer.backup-…` folder (nothing is deleted) and returns you to an empty
-setup page. Rename the backup back if you want your data again.
+**Someone else wants to try it on my computer — how do I keep our data apart?**
+Use **profiles** (the better option): on the setup page, in the **Profile**
+section, click **New profile**, name it, and their imports/analysis/dashboard
+stay in their own space — switch between profiles any time from the dropdown
+there or the switcher in the dashboard corner. Your original data is the
+**`default`** profile. If you'd rather just wipe the *current* profile and start
+over, click **Start fresh (archive current data)**: it moves that profile's
+`Chats/`, `Outputs/` and `Dashboard/` into a timestamped
+`profiles/<name>.backup-…` folder (nothing is deleted, and other profiles are
+untouched) and returns you to an empty setup page. Rename the backup back if you
+want that data again.
+
+**Where do profiles live, and what happens to my old data?**
+Each profile is a self-contained folder under `profiles/` inside your data
+directory — `profiles/<name>/` with its own `Chats/`, `Outputs/` and
+`Dashboard/`. The first time you run this version, any existing top-level
+`Chats/`, `Outputs/` and `Dashboard/` are moved once into `profiles/default/`
+automatically (a one-line note is printed); nothing is copied or deleted and the
+step is skipped on every later run. Setting `CHAT_ANALYZER_HOME` still relocates
+the whole data directory — profiles live inside it.
 
 **Does the app phone home?**
 The analysis never leaves your machine. The only network request the app ever

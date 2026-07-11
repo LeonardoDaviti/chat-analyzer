@@ -107,8 +107,8 @@ print("ANALYSED", len(res))
 # --------------------------------------------------------------------------- #
 def test_safe_static_rejects_traversal(launcher_mod):
     mod, home = launcher_mod
-    (mod.DASH_DIR / "data").mkdir(parents=True)
-    (mod.DASH_DIR / "data" / "x.js").write_text("ok")
+    (mod.dash_dir() / "data").mkdir(parents=True)
+    (mod.dash_dir() / "data" / "x.js").write_text("ok")
     assert mod.safe_static("/data/x.js") is not None
     assert mod.safe_static("/../launcher.py") is None
     assert mod.safe_static("/../../etc/passwd") is None
@@ -140,10 +140,10 @@ def test_inject_add_chats_no_body_tag(launcher_mod):
 def test_manifest_ready(launcher_mod):
     mod, home = launcher_mod
     assert mod.manifest_ready() is False
-    mod.MANIFEST.parent.mkdir(parents=True)
-    mod.MANIFEST.write_text("")           # empty -> not ready
+    mod.manifest_path().parent.mkdir(parents=True)
+    mod.manifest_path().write_text("")           # empty -> not ready
     assert mod.manifest_ready() is False
-    mod.MANIFEST.write_text("window.DASHBOARD_MANIFEST=[]")
+    mod.manifest_path().write_text("window.DASHBOARD_MANIFEST=[]")
     assert mod.manifest_ready() is True
 
 
@@ -209,8 +209,8 @@ def test_ingest_routes_instagram_zip(launcher_mod, tmp_path):
     zp = tmp_path / "instagram-export.zip"
     _make_instagram_zip(zp)
     mod._ingest(zp)
-    # import_zip files Instagram exports under Chats/Instagram/<stem>/
-    assert (home / "Chats" / "Instagram" / "instagram-export").exists()
+    # import_zip files Instagram exports under the active profile's Chats/Instagram/<stem>/
+    assert (mod.active_root() / "Chats" / "Instagram" / "instagram-export").exists()
 
 
 def test_ingest_copies_folder(launcher_mod, tmp_path):
@@ -219,7 +219,7 @@ def test_ingest_copies_folder(launcher_mod, tmp_path):
     src.mkdir()
     (src / "result.json").write_text('{"messages":[]}')
     mod._ingest(src)
-    dest = home / "Chats" / "imported_some_telegram_export"
+    dest = mod.active_root() / "Chats" / "imported_some_telegram_export"
     assert (dest / "result.json").exists()
 
 
@@ -245,7 +245,7 @@ def test_ingest_names_folder_after_upload(launcher_mod, tmp_path):
     tmp = tmp_path / "tmp2ip9o4qu.zip"          # a mkstemp-style temp name
     _make_instagram_zip(tmp)
     mod._ingest(tmp, display_name="My Export.zip")
-    dest = home / "Chats" / "Instagram"
+    dest = mod.active_root() / "Chats" / "Instagram"
     assert (dest / "My Export").exists()
     assert not any(p.name.startswith("tmp") for p in dest.iterdir())
 
@@ -377,9 +377,9 @@ def test_routes_setup_and_progress(live_server):
 
 def test_route_serves_dashboard_with_injection(live_server):
     mod, home, base = live_server
-    (mod.DASH_DIR / "data").mkdir(parents=True)
-    mod.MANIFEST.write_text("window.DASHBOARD_MANIFEST=[]")
-    (mod.DASH_DIR / "index.html").write_text("<html><body>DASH</body></html>")
+    (mod.dash_dir() / "data").mkdir(parents=True)
+    mod.manifest_path().write_text("window.DASHBOARD_MANIFEST=[]")
+    (mod.dash_dir() / "index.html").write_text("<html><body>DASH</body></html>")
     body = urllib.request.urlopen(base + "/", timeout=5).read()
     assert b"DASH" in body
     assert b"Add chats" in body  # injected at serve time

@@ -96,8 +96,129 @@ def work_root() -> Path:
 
 BUNDLE_ROOT = bundle_root()
 WORK_ROOT = work_root()
-DASH_DIR = WORK_ROOT / "Dashboard"
-MANIFEST = DASH_DIR / "data" / "manifest.js"
+
+# --------------------------------------------------------------------------- #
+# Multi-user profiles (M3.3)
+# --------------------------------------------------------------------------- #
+# Each profile is a self-contained data root: WORK_ROOT/profiles/<name>/ holding
+# its own Chats/, Outputs/ and Dashboard/. The active profile is recorded in
+# WORK_ROOT/profiles/active.json. CHAT_ANALYZER_HOME still relocates WORK_ROOT;
+# profiles live *under* it. All serving/import/reanalyze/start-fresh operate on
+# the ACTIVE profile's dirs — the accessors below are the single source of truth
+# (constants would go stale the moment a user switches profiles at runtime).
+DEFAULT_PROFILE = "default"
+_PROFILE_DIRS = ("Chats", "Outputs", "Dashboard")
+
+
+def profiles_dir() -> Path:
+    return WORK_ROOT / "profiles"
+
+
+def active_file() -> Path:
+    return profiles_dir() / "active.json"
+
+
+def sanitize_profile_name(name: str) -> str:
+    """Reduce a user-supplied profile name to the allowed ``[A-Za-z0-9._ -]`` set.
+
+    Mirrors ``_sanitize_upload_name``: keeps only alphanumerics plus ``._ -``,
+    strips surrounding whitespace and caps the length at 40 chars. Returns ``""``
+    for an unusable name (caller rejects it) — never invents a fallback the way
+    upload naming does, because an empty profile name must be an error.
+    """
+    cleaned = "".join(c for c in (name or "") if c.isalnum() or c in "._ -")
+    return cleaned.strip()[:40].strip()
+
+
+def _read_active_profile() -> str:
+    """Return the persisted active-profile name (``default`` when unset/invalid)."""
+    try:
+        data = json.loads(active_file().read_text(encoding="utf-8"))
+        name = sanitize_profile_name(str(data.get("active", "")))
+        if name:
+            return name
+    except (OSError, ValueError):
+        pass
+    return DEFAULT_PROFILE
+
+
+def _write_active_profile(name: str) -> None:
+    profiles_dir().mkdir(parents=True, exist_ok=True)
+    active_file().write_text(
+        json.dumps({"active": name}), encoding="utf-8")
+
+
+def active_profile() -> str:
+    return _read_active_profile()
+
+
+def active_root() -> Path:
+    """The writable data root of the ACTIVE profile (holds Chats/Outputs/Dashboard)."""
+    return profiles_dir() / active_profile()
+
+
+def list_profiles() -> list[str]:
+    """Existing profile names (dirs under profiles/), excluding start-fresh backups.
+
+    Backups are stored as ``profiles/<name>.backup-<ts>`` (see ``start_fresh``);
+    those are not selectable profiles, so they're filtered out here.
+    """
+    pdir = profiles_dir()
+    names = []
+    if pdir.is_dir():
+        for p in pdir.iterdir():
+            if p.is_dir() and ".backup-" not in p.name:
+                names.append(p.name)
+    if DEFAULT_PROFILE not in names:
+        names.append(DEFAULT_PROFILE)
+    return sorted(names)
+
+
+def dash_dir() -> Path:
+    return active_root() / "Dashboard"
+
+
+def manifest_path() -> Path:
+    return dash_dir() / "data" / "manifest.js"
+
+
+def _migrate_legacy_layout() -> bool:
+    """One-time transparent migration of a pre-profiles WORK_ROOT.
+
+    Condition (ALL must hold): ``profiles/`` does not yet exist AND at least one
+    legacy top-level ``Chats``/``Outputs``/``Dashboard`` dir is present. When it
+    fires, those dirs are *moved* (never copied) into ``profiles/default/`` and
+    ``default`` is recorded as active. Idempotent: once ``profiles/`` exists this
+    is a no-op. Only the three named dirs are touched, so ``ChatAnalyzer.backup-*``
+    (and anything else) is left untouched. Returns True iff a move happened.
+    """
+    if profiles_dir().exists():
+        return False
+    legacy = [n for n in _PROFILE_DIRS if (WORK_ROOT / n).is_dir()]
+    if not legacy:
+        return False
+    default_dir = profiles_dir() / DEFAULT_PROFILE
+    default_dir.mkdir(parents=True, exist_ok=True)
+    for name in legacy:
+        shutil.move(str(WORK_ROOT / name), str(default_dir / name))
+    _write_active_profile(DEFAULT_PROFILE)
+    print(f"Migrated existing data into profiles/{DEFAULT_PROFILE}/ "
+          f"({', '.join(legacy)}).")
+    return True
+
+
+def ensure_profiles() -> None:
+    """Make the profiles layout usable: migrate legacy data, seed active + dirs.
+
+    Safe to call repeatedly; the migration step is guarded to run at most once.
+    NOT called at import time — only from real startup (``_ensure_runtime_layout``)
+    and tests — so merely importing the module never moves a source tree's data.
+    """
+    _migrate_legacy_layout()
+    profiles_dir().mkdir(parents=True, exist_ok=True)
+    if not active_file().exists():
+        _write_active_profile(DEFAULT_PROFILE)
+    active_root().mkdir(parents=True, exist_ok=True)
 
 
 def _ensure_runtime_layout() -> None:
@@ -110,6 +231,7 @@ def _ensure_runtime_layout() -> None:
     if str(BUNDLE_ROOT) not in sys.path:
         sys.path.insert(0, str(BUNDLE_ROOT))
     WORK_ROOT.mkdir(parents=True, exist_ok=True)
+    ensure_profiles()  # migrate legacy layout + seed the active profile (M3.3)
     os.chdir(WORK_ROOT)
     asset = WORK_ROOT / "assets" / "echarts.min.js"
     if not asset.exists():
@@ -242,10 +364,10 @@ def _ingest(source_path: Path, display_name: str | None = None) -> None:
     import main  # lazy — keeps `import launcher` matplotlib/numpy free
 
     if source_path.is_file() and source_path.suffix.lower() == ".zip":
-        main.import_zip(str(source_path), WORK_ROOT, dest_name=display_name)
+        main.import_zip(str(source_path), active_root(), dest_name=display_name)
         return
     if source_path.is_dir():
-        dest = WORK_ROOT / "Chats" / f"imported_{source_path.name}"
+        dest = active_root() / "Chats" / f"imported_{source_path.name}"
         if dest.exists():
             shutil.rmtree(dest)
         shutil.copytree(source_path, dest)
@@ -263,6 +385,10 @@ def run_pipeline(source_path: Path | None, cleanup: bool = False,
     entirely and the run goes straight to analysis over the existing ``Chats/``.
     """
     global _running
+    # Snapshot the active profile's dirs for the whole run. Profile switching is
+    # blocked while a run is active (409), so these can't shift mid-pipeline.
+    root = active_root()
+    dash = root / "Dashboard"
     try:
         if import_step:
             _set_progress(stage="importing",
@@ -281,8 +407,8 @@ def run_pipeline(source_path: Path | None, cleanup: bool = False,
             _set_progress(stage="analyzing", detail=chat_name, i=i, n=n)
 
         main.run_all(
-            base_dir=WORK_ROOT,
-            output_dir=str(WORK_ROOT / "Outputs"),
+            base_dir=root,
+            output_dir=str(root / "Outputs"),
             # Visualizations and session markdown are skipped by default —
             # the dashboard reads JSON directly. Use --visuals / --sessions
             # to opt-in when running from the CLI.
@@ -292,16 +418,16 @@ def run_pipeline(source_path: Path | None, cleanup: bool = False,
         _set_progress(stage="dashboard", detail="building dashboard")
         from src.dashboard_export import run_export
         run_export(
-            output_dir=str(WORK_ROOT / "Outputs"),
-            dash_dir=str(DASH_DIR),
+            output_dir=str(root / "Outputs"),
+            dash_dir=str(dash),
         )
 
         _set_progress(stage="connected", detail="building connected profile")
         try:
             import build_connected
             build_connected.main([
-                "--chats-dir", str(WORK_ROOT / "Chats"),
-                "--dash-dir", str(DASH_DIR),
+                "--chats-dir", str(root / "Chats"),
+                "--dash-dir", str(dash),
             ])
         except SystemExit:
             pass
@@ -311,7 +437,7 @@ def run_pipeline(source_path: Path | None, cleanup: bool = False,
         _set_progress(stage="insights", detail="finding what stands out")
         try:
             import build_insights
-            build_insights.main(["--dash-dir", str(DASH_DIR)])
+            build_insights.main(["--dash-dir", str(dash)])
         except SystemExit:
             pass
         except Exception as exc:  # findings are best-effort, never fatal
@@ -366,19 +492,22 @@ def _start_reanalyze() -> bool:
 # Start fresh (M1.6) — archive current data, never delete
 # --------------------------------------------------------------------------- #
 def start_fresh() -> tuple[Path, list[str]]:
-    """Move ``Chats``/``Outputs``/``Dashboard`` into a timestamped backup folder.
+    """Archive the ACTIVE profile's ``Chats``/``Outputs``/``Dashboard`` (M3.3).
 
-    Creates a sibling ``ChatAnalyzer.backup-YYYYMMDD-HHMMSS`` directory under
-    WORK_ROOT and *moves* (never deletes) whichever of the three data dirs exist
-    into it, returning ``(backup_dir, moved_names)``. The setup page then reloads
-    to its empty state because the manifest is gone.
+    Creates ``profiles/<active>.backup-YYYYMMDD-HHMMSS`` and *moves* (never
+    deletes) whichever of the three data dirs exist into it, returning
+    ``(backup_dir, moved_names)``. Only the active profile is touched — other
+    profiles and their data are left alone. The setup page then reloads to its
+    empty state because the active profile's manifest is gone.
     """
+    active = active_profile()
+    root = active_root()
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup = WORK_ROOT / f"ChatAnalyzer.backup-{stamp}"
+    backup = profiles_dir() / f"{active}.backup-{stamp}"
     backup.mkdir(parents=True, exist_ok=True)
     moved: list[str] = []
-    for name in ("Chats", "Outputs", "Dashboard"):
-        src = WORK_ROOT / name
+    for name in _PROFILE_DIRS:
+        src = root / name
         if src.exists():
             shutil.move(str(src), str(backup / name))
             moved.append(name)
@@ -609,6 +738,16 @@ Update available — <a id="updateLink" href="__RELEASES_PAGE__" target="_blank"
 <div class="muted" style="margin-top:8px">Your dashboard and imported chats are stored in:<br>
 <code style="color:#4DB6AC;word-break:break-all">__WORK_ROOT__</code></div>
 
+<div class="sep">Profile — active: <b id="activeName">__ACTIVE_PROFILE__</b></div>
+<div class="row">
+<select id="profileSelect" style="flex:1;min-width:160px;padding:9px 10px;background:#1a1d21;color:var(--text);border:1px solid var(--border);border-radius:8px;font-size:13px"></select>
+<button id="switchBtn">Switch</button>
+</div>
+<div class="row" style="margin-top:8px">
+<input id="newProfile" type="text" placeholder="new profile name" style="flex:1;min-width:160px">
+<button id="createBtn" class="ghost">New profile</button>
+</div>
+
 <div id="drop">Drop your Instagram or Telegram export <b>.zip</b> or a <b>folder</b> here<br>
 <span class="muted">or click to choose a file, <span id="folderPick" class="linklike">choose a folder</span>, or paste a path below</span>
 <input id="file" type="file" accept=".zip" hidden>
@@ -691,6 +830,25 @@ function uploadEntries(entries){busy();status.textContent='Reading folder...';
     const fd=new FormData();out.forEach(function(o){fd.append('files',o.file,o.path);});
     return fetch('/upload-folder',{method:'POST',body:fd}).then(r=>r.json()).then(handleStart);
   }).catch(e=>fail(''+e));}
+// ---- profiles (M3.3): list, switch, create ---- //
+const profileSelect=document.getElementById('profileSelect'),
+  switchBtn=document.getElementById('switchBtn'),createBtn=document.getElementById('createBtn'),
+  newProfile=document.getElementById('newProfile'),activeName=document.getElementById('activeName');
+function loadProfiles(){fetch('/profile').then(r=>r.json()).then(j=>{
+  activeName.textContent=j.active;profileSelect.innerHTML='';
+  (j.profiles||[]).forEach(function(n){const o=document.createElement('option');
+    o.value=n;o.textContent=n;if(n===j.active)o.selected=true;profileSelect.appendChild(o);});
+}).catch(()=>{});}
+function postProfile(action,name){return fetch('/profile',{method:'POST',
+  headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({action:action,name:name})}).then(r=>r.json().then(j=>({s:r.status,j:j})));}
+switchBtn.onclick=()=>{const n=profileSelect.value;if(!n)return;
+  postProfile('switch',n).then(o=>{if(o.s===409){fail('A run is in progress — cannot switch.');return;}
+    if(o.j.error){fail(o.j.error);return;}location.href='/';}).catch(e=>fail(''+e));};
+createBtn.onclick=()=>{const n=newProfile.value.trim();if(!n){fail('Enter a profile name.');return;}
+  postProfile('create',n).then(o=>{if(o.s===409){fail('A run is in progress — cannot create.');return;}
+    if(o.j.error){fail(o.j.error);return;}location.href='/';}).catch(e=>fail(''+e));};
+loadProfiles();
 // ---- update banner (fail-silent; server does the actual check) ---- //
 fetch('/version').then(r=>r.json()).then(v=>{if(v&&v.update_available){
   const b=document.getElementById('updateBanner');if(b){b.style.display='block';
@@ -757,25 +915,57 @@ def _update_banner_bytes() -> bytes:
 
 
 def render_setup_html() -> bytes:
-    """The setup/drop page with the writable data location filled in.
+    """The setup/drop page with the writable data location + active profile filled in.
 
     Users need to know where their dashboard and imported chats live — the
-    console window is the only other place it's shown. WORK_ROOT is a local
-    filesystem path (never chat content), safe to display.
+    console window is the only other place it's shown. The active profile's root
+    is a local filesystem path (never chat content), safe to display.
     """
     html = (SETUP_HTML
-            .replace("__WORK_ROOT__", str(WORK_ROOT))
+            .replace("__WORK_ROOT__", str(active_root()))
+            .replace("__ACTIVE_PROFILE__", active_profile())
             .replace("__RELEASES_PAGE__", RELEASES_PAGE))
     return html.encode("utf-8")
 
 
+def _profile_switcher_bytes() -> bytes:
+    """A compact dashboard-header profile switcher (current name + switch dropdown).
+
+    Rendered per-request so the shown name always matches the active profile. A
+    ``<select>`` is populated from ``/profile`` and, on change, POSTs a switch and
+    reloads (or alerts on a 409 while a run is active).
+    """
+    name = active_profile()
+    html = (
+        '<div id="ca-profile" style="position:fixed;left:16px;top:16px;z-index:9999;'
+        'display:flex;gap:6px;align-items:center;background:#22262B;'
+        'border:1px solid #4DB6AC;border-radius:20px;padding:6px 12px;'
+        'font:600 12px -apple-system,Segoe UI,Roboto,sans-serif;color:#4DB6AC;'
+        'box-shadow:0 2px 8px rgba(0,0,0,.4)">Profile: '
+        f'<span id="ca-prof-name">{name}</span>'
+        '<select id="ca-prof-sel" onchange="(function(s){fetch(\'/profile\','
+        '{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},'
+        'body:JSON.stringify({action:\'switch\',name:s.value})}).then(function(r){'
+        'if(r.status===409){alert(\'A run is in progress — cannot switch.\');return}'
+        'location.href=\'/\'});})(this)" '
+        'style="background:#1a1d21;color:#D8D9DA;border:1px solid #2c3137;'
+        'border-radius:6px;font-size:12px;padding:2px 4px"></select></div>'
+        '<script>fetch(\'/profile\').then(function(r){return r.json()}).then(function(j){'
+        'var s=document.getElementById(\'ca-prof-sel\');if(!s)return;'
+        '(j.profiles||[]).forEach(function(n){var o=document.createElement(\'option\');'
+        'o.value=n;o.textContent=n;if(n===j.active)o.selected=true;s.appendChild(o);});'
+        '}).catch(function(){});</script>'
+    )
+    return html.encode("utf-8")
+
+
 def inject_add_chats(html: bytes) -> bytes:
-    """Insert the floating 'Add chats' / 'Re-analyze' controls (and an update
-    banner when one is available) before </body> at serve time.
+    """Insert the floating 'Add chats' / 'Re-analyze' controls, a profile switcher
+    and an update banner (when one is available) before </body> at serve time.
 
     Never touches the on-disk dashboard so ``file://`` usage is unchanged.
     """
-    snippet = _ADD_CHATS_SNIPPET + _update_banner_bytes()
+    snippet = _ADD_CHATS_SNIPPET + _profile_switcher_bytes() + _update_banner_bytes()
     marker = b"</body>"
     idx = html.rfind(marker)
     if idx == -1:
@@ -798,10 +988,11 @@ _MIME = {
 
 
 def safe_static(url_path: str):
-    """Resolve a URL path to a file under Dashboard/, or None (traversal-safe)."""
+    """Resolve a URL path to a file under the active Dashboard/, or None."""
     rel = url_path.lstrip("/")
-    root = DASH_DIR.resolve()
-    target = (DASH_DIR / rel).resolve()
+    base = dash_dir()
+    root = base.resolve()
+    target = (base / rel).resolve()
     if target == root or root in target.parents:
         if target.is_file():
             return target
@@ -809,20 +1000,23 @@ def safe_static(url_path: str):
 
 
 def manifest_ready() -> bool:
-    """Dashboard is servable when the manifest exists and is non-empty."""
+    """Dashboard is servable when the active profile's manifest exists non-empty."""
     try:
-        return MANIFEST.exists() and MANIFEST.stat().st_size > 0
+        m = manifest_path()
+        return m.exists() and m.stat().st_size > 0
     except OSError:
         return False
 
 
-HIDDEN_FILE = DASH_DIR / "data" / "hidden.json"
+def hidden_path() -> Path:
+    """Active profile's Dashboard/data/hidden.json (builders' hidden-chat source)."""
+    return dash_dir() / "data" / "hidden.json"
 
 
 def _read_hidden() -> list:
     """Return the persisted hidden-chat id list (empty when absent/invalid)."""
     try:
-        data = json.loads(HIDDEN_FILE.read_text(encoding="utf-8"))
+        data = json.loads(hidden_path().read_text(encoding="utf-8"))
         if isinstance(data, list):
             return [x for x in data if isinstance(x, str)]
     except (OSError, ValueError):
@@ -831,9 +1025,10 @@ def _read_hidden() -> list:
 
 
 def _write_hidden(ids: list) -> None:
-    """Persist the hidden-chat id list to Dashboard/data/hidden.json."""
-    HIDDEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    HIDDEN_FILE.write_text(
+    """Persist the hidden-chat id list to the active Dashboard/data/hidden.json."""
+    hp = hidden_path()
+    hp.parent.mkdir(parents=True, exist_ok=True)
+    hp.write_text(
         json.dumps(list(ids), ensure_ascii=False, indent=0), encoding="utf-8")
 
 
@@ -887,18 +1082,22 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/hidden":
             self._json(200, _read_hidden())
             return
+        if route == "/profile":
+            self._json(200, {"active": active_profile(),
+                             "profiles": list_profiles()})
+            return
         if route == "/setup":
             self._send(200, render_setup_html())
             return
         if route == "/":
             if manifest_ready():
-                self._serve_file(DASH_DIR / "index.html", inject=True)
+                self._serve_file(dash_dir() / "index.html", inject=True)
             else:
                 self._redirect("/setup")
             return
         if route in ("/index.html",):
             if manifest_ready():
-                self._serve_file(DASH_DIR / "index.html", inject=True)
+                self._serve_file(dash_dir() / "index.html", inject=True)
                 return
             self._redirect("/setup")
             return
@@ -925,8 +1124,59 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_start_fresh()
         elif route == "/hidden":
             self._handle_hidden()
+        elif route == "/profile":
+            self._handle_profile()
         else:
             self._send(404, b"Not found")
+
+    def _handle_profile(self):
+        """Switch or create a profile (M3.3).
+
+        Body: ``{"action":"switch"|"create","name":<str>}``. Both actions change
+        the active profile, so both are refused with 409 while a run is active.
+        ``create`` makes ``profiles/<name>/`` (and its data dirs) then activates
+        it; ``switch`` requires the profile to already exist. Names are sanitized
+        to ``[A-Za-z0-9._ -]`` (max 40). On success returns ``{"ok":True,...}``;
+        the client redirects to ``/`` (the new profile's dashboard, or /setup if
+        it has no data yet).
+        """
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            action = str(payload.get("action", "")).strip()
+            name = sanitize_profile_name(str(payload.get("name", "")))
+        except Exception as exc:
+            self._json(400, {"error": f"bad request: {exc}"})
+            return
+        if action not in ("switch", "create"):
+            self._json(400, {"error": "action must be 'switch' or 'create'"})
+            return
+        if not name:
+            self._json(400, {"error": "invalid profile name"})
+            return
+        # Changing the active profile mid-run would repoint the pipeline's output
+        # dirs — refuse while a run is active.
+        with _state_lock:
+            if _running:
+                self._json(409, {"busy": True})
+                return
+        existing = list_profiles()
+        if action == "create":
+            if name in existing and (profiles_dir() / name).is_dir():
+                self._json(400, {"error": f"profile '{name}' already exists"})
+                return
+            (profiles_dir() / name).mkdir(parents=True, exist_ok=True)
+        else:  # switch
+            if not (profiles_dir() / name).is_dir():
+                self._json(400, {"error": f"no such profile: {name}"})
+                return
+        try:
+            _write_active_profile(name)
+        except OSError as exc:
+            self._json(500, {"error": f"could not persist active profile: {exc}"})
+            return
+        self._json(200, {"ok": True, "active": name,
+                         "profiles": list_profiles()})
 
     def _handle_hidden(self):
         """Persist the dashboard's hidden-chat id list to Dashboard/data/hidden.json.
@@ -1017,7 +1267,7 @@ class Handler(BaseHTTPRequestHandler):
             if _running:
                 self._json(409, {"busy": True})
                 return
-        if not (WORK_ROOT / "Chats").exists():
+        if not (active_root() / "Chats").exists():
             self._json(400, {"error": "No Chats/ to re-analyze yet — import first."})
             return
         if not _start_reanalyze():

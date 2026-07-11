@@ -58,7 +58,9 @@ def _post(url, data=None, ctype=None):
 
 
 def _seed_two_instagram_chats(home: Path) -> None:
-    inbox = (home / "Chats" / "Instagram" / "exp" /
+    # Seed into the active (default) profile's Chats/ — the launcher serves and
+    # analyzes the active profile under WORK_ROOT/profiles/<active>/.
+    inbox = (home / "profiles" / "default" / "Chats" / "Instagram" / "exp" /
              "your_instagram_activity" / "messages" / "inbox")
     for folder, parts in (("alice_1", ["Owner", "Alice"]),
                           ("bob_2", ["Owner", "Bob"])):
@@ -164,8 +166,11 @@ def test_hidden_route_roundtrip(live_server):
     assert json.loads(resp.read())["saved"] is True
     got = json.loads(urllib.request.urlopen(base + "/hidden", timeout=5).read())
     assert got == ["Alice", "Bob"]
-    on_disk = json.loads((home / "Dashboard" / "data" / "hidden.json").read_text())
+    on_disk = json.loads((mod.hidden_path()).read_text())
     assert on_disk == ["Alice", "Bob"]
+    # hidden.json lives under the ACTIVE profile's Dashboard/data (M3.3).
+    assert mod.hidden_path() == (
+        home / "profiles" / "default" / "Dashboard" / "data" / "hidden.json")
 
 
 def test_hidden_route_rejects_bad_payload(live_server):
@@ -259,7 +264,7 @@ def test_upload_folder_route_imports_tree(live_server):
         if mod._snapshot_progress()["done"] or mod._snapshot_progress()["error"]:
             break
         time.sleep(0.05)
-    found = list((home / "Chats").rglob("result.json"))
+    found = list((mod.active_root() / "Chats").rglob("result.json"))
     assert found, "uploaded telegram folder was not routed into Chats/"
 
 
@@ -315,39 +320,55 @@ def test_reanalyze_rejected_while_running(launcher_mod):
 # --------------------------------------------------------------------------- #
 def test_start_fresh_archives_and_never_deletes(launcher_mod):
     mod, home = launcher_mod
+    root = mod.active_root()
     for name in ("Chats", "Outputs", "Dashboard"):
-        d = home / name
-        d.mkdir()
+        d = root / name
+        d.mkdir(parents=True)
         (d / "marker.txt").write_text(name)
 
     backup, moved = mod.start_fresh()
 
     assert set(moved) == {"Chats", "Outputs", "Dashboard"}
-    # Originals are gone from the live location...
+    # Originals are gone from the active profile's live location...
     for name in ("Chats", "Outputs", "Dashboard"):
-        assert not (home / name).exists()
+        assert not (root / name).exists()
         # ...but preserved (moved, not deleted) inside the backup.
         assert (backup / name / "marker.txt").read_text() == name
-    assert backup.parent == home
-    assert backup.name.startswith("ChatAnalyzer.backup-")
+    # Backups live under profiles/ as <active>.backup-<ts> (M3.3 scoping).
+    assert backup.parent == mod.profiles_dir()
+    assert backup.name.startswith(f"{mod.active_profile()}.backup-")
 
 
 def test_start_fresh_partial_dirs(launcher_mod):
     mod, home = launcher_mod
-    (home / "Chats").mkdir()
+    (mod.active_root() / "Chats").mkdir(parents=True)
     backup, moved = mod.start_fresh()
     assert moved == ["Chats"]
     assert (backup / "Chats").exists()
 
 
+def test_start_fresh_only_scopes_active_profile(launcher_mod):
+    """start-fresh must not touch OTHER profiles' data (M3.3)."""
+    mod, home = launcher_mod
+    # active = default; seed default + a second profile "beta".
+    (mod.active_root() / "Chats").mkdir(parents=True)
+    (mod.active_root() / "Chats" / "a").write_text("x")
+    beta = mod.profiles_dir() / "beta" / "Chats"
+    beta.mkdir(parents=True)
+    (beta / "keep").write_text("y")
+    mod.start_fresh()
+    assert not (mod.active_root() / "Chats").exists()
+    assert (beta / "keep").read_text() == "y"     # untouched
+
+
 def test_start_fresh_route(live_server):
     mod, home, base = live_server
-    (home / "Chats").mkdir()
-    (home / "Chats" / "x").write_text("y")
+    (mod.active_root() / "Chats").mkdir(parents=True)
+    (mod.active_root() / "Chats" / "x").write_text("y")
     resp = _post(base + "/start-fresh")
     body = json.loads(resp.read())
     assert body["ok"] is True and "Chats" in body["moved"]
-    assert not (home / "Chats").exists()
+    assert not (mod.active_root() / "Chats").exists()
     assert Path(body["backup"]).exists()
 
 
