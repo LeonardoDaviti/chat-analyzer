@@ -48,7 +48,7 @@ PORT = 8347
 HOST = "127.0.0.1"
 
 # Single source of truth for the app version (also referenced by the spec/CI tag).
-APP_VERSION = "1.1.0"
+APP_VERSION = "2.0.0"
 
 # The ONLY network endpoint the entire product ever touches — a metadata-only,
 # fail-silent GitHub release check (M1.5). No content, no telemetry.
